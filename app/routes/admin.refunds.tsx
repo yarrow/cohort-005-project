@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
 import { eq } from "drizzle-orm";
 import { toast } from "sonner";
@@ -9,6 +9,7 @@ import { db } from "~/db";
 import { UserRole, users } from "~/db/schema";
 import { getCurrentUserId } from "~/lib/session";
 import { parseFormData } from "~/lib/validation";
+import { logEmail, type Email } from "~/lib/email.server";
 import {
   approveRefundRequest,
   declineRefundRequest,
@@ -60,6 +61,9 @@ export async function loader({ request }: Route.LoaderArgs) {
   return { refundRequests: listOpenRefundRequests() };
 }
 
+const REASON_REQUIRED =
+  "Write a reason for declining. The learner will see it.";
+
 const refundDecisionSchema = z.discriminatedUnion("intent", [
   z.object({
     intent: z.literal("approve"),
@@ -71,7 +75,7 @@ const refundDecisionSchema = z.discriminatedUnion("intent", [
     reason: z
       .string()
       .trim()
-      .min(1, "Write a reason for declining. The learner will see it.")
+      .min(1, REASON_REQUIRED)
       .max(1000, "Please keep the reason under 1000 characters."),
   }),
 ]);
@@ -82,21 +86,8 @@ const refusalMessages: Record<RefundDecisionRefusal, string> = {
     "That Refund Request has already been decided, perhaps in another tab.",
 };
 
-/** A refused decision. `fieldErrors` are shown inline, next to the field. */
-type DecisionRefused = {
-  ok: false;
-  error: string;
-  fieldErrors?: Record<string, string>;
-};
-
-const REASON_REQUIRED =
-  "Write a reason for declining. The learner will see it.";
-
-/**
- * Tells the learner their Refund Request was approved. There is no mail
- * transport wired up yet, so the built message goes to the server log.
- */
-function buildApprovalEmail({ learner, course }: RefundDecisionSubject) {
+/** Tells the learner their Refund Request was approved. */
+function buildApprovalEmail({ learner, course }: RefundDecisionSubject): Email {
   return {
     to: learner.email,
     subject: `Refund approved — ${course.title}`,
@@ -113,15 +104,12 @@ function buildApprovalEmail({ learner, course }: RefundDecisionSubject) {
   };
 }
 
-/**
- * Tells the learner their Refund Request was declined, and why. There is no
- * mail transport wired up yet, so the built message goes to the server log.
- */
+/** Tells the learner their Refund Request was declined, and why. */
 function buildDeclineEmail({
   learner,
   course,
   reason,
-}: RefundDecisionSubject & { reason: string }) {
+}: RefundDecisionSubject & { reason: string }): Email {
   return {
     to: learner.email,
     subject: `Refund declined — ${course.title}`,
@@ -149,14 +137,9 @@ export async function action({ request }: Route.ActionArgs) {
   const parsed = parseFormData(formData, refundDecisionSchema);
 
   if (!parsed.success) {
-    return data<DecisionRefused>(
-      {
-        ok: false,
-        error: Object.values(parsed.errors)[0] ?? "Invalid input.",
-        fieldErrors: parsed.errors,
-      },
-      { status: 400 }
-    );
+    throw data(Object.values(parsed.errors)[0] ?? "Invalid input.", {
+      status: 400,
+    });
   }
 
   switch (parsed.data.intent) {
@@ -167,21 +150,12 @@ export async function action({ request }: Route.ActionArgs) {
       });
 
       if (!result.ok) {
-        return data<DecisionRefused>(
-          { ok: false, error: refusalMessages[result.refusedBecause] },
-          { status: 409 }
-        );
+        throw data(refusalMessages[result.refusedBecause], { status: 409 });
       }
 
-      const email = buildApprovalEmail(result);
-      console.log(
-        `[email] to=${email.to} subject=${email.subject}\n${email.body}`
-      );
+      logEmail(buildApprovalEmail(result));
 
-      return {
-        ok: true as const,
-        message: `Approved ${result.learner.name}'s Refund Request.`,
-      };
+      return { message: `Approved ${result.learner.name}'s Refund Request.` };
     }
     case "decline": {
       const result = declineRefundRequest({
@@ -192,33 +166,19 @@ export async function action({ request }: Route.ActionArgs) {
 
       if (!result.ok) {
         if (result.refusedBecause === "reason-required") {
-          return data<DecisionRefused>(
-            {
-              ok: false,
-              error: REASON_REQUIRED,
-              fieldErrors: { reason: REASON_REQUIRED },
-            },
-            { status: 400 }
-          );
+          throw data(REASON_REQUIRED, { status: 400 });
         }
-        return data<DecisionRefused>(
-          { ok: false, error: refusalMessages[result.refusedBecause] },
-          { status: 409 }
-        );
+        throw data(refusalMessages[result.refusedBecause], { status: 409 });
       }
 
-      const email = buildDeclineEmail({
-        ...result,
-        reason: result.refundRequest.declineReason ?? parsed.data.reason,
-      });
-      console.log(
-        `[email] to=${email.to} subject=${email.subject}\n${email.body}`
+      logEmail(
+        buildDeclineEmail({
+          ...result,
+          reason: result.refundRequest.declineReason ?? parsed.data.reason,
+        })
       );
 
-      return {
-        ok: true as const,
-        message: `Declined ${result.learner.name}'s Refund Request.`,
-      };
+      return { message: `Declined ${result.learner.name}'s Refund Request.` };
     }
   }
 }
@@ -249,15 +209,25 @@ const headings = [
   "Decision",
 ];
 
-function DecisionCell({ refundRequestId }: { refundRequestId: number }) {
-  const approveFetcher = useFetcher<typeof action>();
-  const approving = approveFetcher.state !== "idle";
+/**
+ * A fetcher for one decision, toasting its outcome once it settles. Refusals
+ * are thrown by the action and land in the ErrorBoundary.
+ */
+function useDecisionFetcher() {
+  const fetcher = useFetcher<typeof action>();
 
   useEffect(() => {
-    if (approveFetcher.state !== "idle" || !approveFetcher.data) return;
-    if (approveFetcher.data.ok) toast.success(approveFetcher.data.message);
-    else toast.error(approveFetcher.data.error);
-  }, [approveFetcher.state, approveFetcher.data]);
+    if (fetcher.state === "idle" && fetcher.data) {
+      toast.success(fetcher.data.message);
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  return fetcher;
+}
+
+function DecisionCell({ refundRequestId }: { refundRequestId: number }) {
+  const approveFetcher = useDecisionFetcher();
+  const approving = approveFetcher.state !== "idle";
 
   return (
     <td className="px-4 py-3 text-sm">
@@ -274,26 +244,28 @@ function DecisionCell({ refundRequestId }: { refundRequestId: number }) {
 }
 
 function DeclineForm({ refundRequestId }: { refundRequestId: number }) {
-  const declineFetcher = useFetcher<typeof action>();
+  const declineFetcher = useDecisionFetcher();
   const declining = declineFetcher.state !== "idle";
-  const result = declineFetcher.state === "idle" ? declineFetcher.data : null;
-  const reasonError =
-    result && !result.ok ? result.fieldErrors?.reason : undefined;
+  // A missing reason is caught here and shown inline, next to the field. The
+  // action refuses it too (400), but a thrown response cannot point at a field.
+  const [reasonError, setReasonError] = useState<string | null>(null);
   const reasonId = `decline-reason-${refundRequestId}`;
   const reasonErrorId = `${reasonId}-error`;
-
-  useEffect(() => {
-    if (declineFetcher.state !== "idle" || !declineFetcher.data) return;
-    if (declineFetcher.data.ok) toast.success(declineFetcher.data.message);
-    // A missing reason is shown inline, next to the field.
-    else if (!declineFetcher.data.fieldErrors)
-      toast.error(declineFetcher.data.error);
-  }, [declineFetcher.state, declineFetcher.data]);
 
   return (
     <declineFetcher.Form
       method="post"
       className="mt-3 flex min-w-56 flex-col gap-2"
+      noValidate
+      onSubmit={(event) => {
+        const reason = new FormData(event.currentTarget).get("reason");
+        if (typeof reason !== "string" || reason.trim() === "") {
+          event.preventDefault();
+          setReasonError(REASON_REQUIRED);
+          return;
+        }
+        setReasonError(null);
+      }}
     >
       <input type="hidden" name="intent" value="decline" />
       <input type="hidden" name="refundRequestId" value={refundRequestId} />
@@ -323,33 +295,46 @@ function DeclineForm({ refundRequestId }: { refundRequestId: number }) {
 }
 
 function RefundRequestRow({
-  refundRequest: r,
+  refundRequest,
 }: {
   refundRequest: OpenRefundRequestListing;
 }) {
+  const {
+    id,
+    learner,
+    course,
+    amountPaid,
+    reason,
+    requestedAt,
+    lessonsCompleted,
+    totalLessons,
+    secondsWatched,
+    daysSincePurchase,
+  } = refundRequest;
+
   return (
     <tr className="border-b border-border align-top last:border-0">
       <td className="px-4 py-3 text-sm">
-        <div className="font-medium">{r.learner.name}</div>
-        <div className="text-muted-foreground">{r.learner.email}</div>
+        <div className="font-medium">{learner.name}</div>
+        <div className="text-muted-foreground">{learner.email}</div>
       </td>
-      <td className="px-4 py-3 text-sm">{r.course.title}</td>
-      <td className="px-4 py-3 text-sm">{formatPrice(r.amountPaid)}</td>
+      <td className="px-4 py-3 text-sm">{course.title}</td>
+      <td className="px-4 py-3 text-sm">{formatPrice(amountPaid)}</td>
       <td className="max-w-xs whitespace-pre-wrap px-4 py-3 text-sm">
-        {r.reason}
+        {reason}
       </td>
       <td className="px-4 py-3 text-sm text-muted-foreground">
-        {requestedAtFormat.format(new Date(r.requestedAt))} UTC
+        {requestedAtFormat.format(new Date(requestedAt))} UTC
       </td>
       <td className="px-4 py-3 text-sm">
-        {r.lessonsCompleted} of {r.totalLessons} (
-        {percentOf(r.lessonsCompleted, r.totalLessons)}%)
+        {lessonsCompleted} of {totalLessons} (
+        {percentOf(lessonsCompleted, totalLessons)}%)
       </td>
-      <td className="px-4 py-3 text-sm">{formatHours(r.secondsWatched)}</td>
+      <td className="px-4 py-3 text-sm">{formatHours(secondsWatched)}</td>
       <td className="px-4 py-3 text-sm">
-        {r.daysSincePurchase} of {REFUND_WINDOW_DAYS}
+        {daysSincePurchase} of {REFUND_WINDOW_DAYS}
       </td>
-      <DecisionCell refundRequestId={r.id} />
+      <DecisionCell refundRequestId={id} />
     </tr>
   );
 }
