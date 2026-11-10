@@ -244,6 +244,8 @@ export const refunds = sqliteTable(
     reason: text("reason").notNull(),
     // Null until someone approves — a declined request refunds nothing.
     amountRefunded: integer("amount_refunded"),
+    // The Platform Admin's words to the learner. Set only when declined.
+    declineReason: text("decline_reason"),
     requestedAt: text("requested_at")
       .notNull()
       .$defaultFn(() => new Date().toISOString()),

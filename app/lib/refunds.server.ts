@@ -403,3 +403,50 @@ export function approveRefundRequest(input: {
     return { ok: true, refundRequest, learner, course } as const;
   });
 }
+
+export type DeclineRefundRequestResult =
+  | ({
+      ok: true;
+      refundRequest: typeof refunds.$inferSelect;
+    } & RefundDecisionSubject)
+  | {
+      ok: false;
+      refusedBecause: RefundDecisionRefusal | "reason-required";
+    };
+
+/**
+ * A Platform Admin declines an Open Refund Request, giving the learner a
+ * reason. The enrollment is kept, so access comes straight back with progress
+ * as it was (ADR 0001). Eligibility is not judged again.
+ */
+export function declineRefundRequest(input: {
+  refundRequestId: number;
+  platformAdminId: number;
+  reason: string;
+  now?: Date;
+}): DeclineRefundRequestResult {
+  const reason = input.reason.trim();
+  if (reason === "") return { ok: false, refusedBecause: "reason-required" };
+
+  const now = input.now ?? new Date();
+
+  return db.transaction((tx) => {
+    const found = findRefundRequestToDecide(tx, input.refundRequestId);
+    if (!found.ok) return found;
+    const { learner, course } = found;
+
+    const refundRequest = tx
+      .update(refunds)
+      .set({
+        status: RefundStatus.Declined,
+        declineReason: reason,
+        resolvedAt: now.toISOString(),
+        resolvedByUserId: input.platformAdminId,
+      })
+      .where(eq(refunds.id, input.refundRequestId))
+      .returning()
+      .get();
+
+    return { ok: true, refundRequest, learner, course } as const;
+  });
+}
