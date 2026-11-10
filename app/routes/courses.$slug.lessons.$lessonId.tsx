@@ -54,6 +54,7 @@ import { YouTubePlayer } from "~/components/youtube-player";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
 import { COUNTRIES } from "~/lib/ppp";
+import { RefundPausedNotice } from "~/components/refund-paused-notice";
 import { parseFormData, parseParams } from "~/lib/validation";
 
 const lessonParamsSchema = z.object({
@@ -724,13 +725,16 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   const access = await getAccess(request, course.id);
   const currentUserId = access.userId;
   const enrolled = access.enrolled;
+  // Access is paused while an Open Refund Request is under review, and the
+  // learner's progress stays exactly where it was when they asked.
+  const refundRequestedAt = access.openRefundRequest?.requestedAt ?? null;
   let lessonStatus: string | null = null;
   let lastWatchPosition = 0;
   let watchProgress = 0;
   let lessonProgressMap: Record<number, string> = {};
 
   if (currentUserId) {
-    if (enrolled) {
+    if (enrolled && !refundRequestedAt) {
       // Mark lesson as in-progress when viewed
       markLessonInProgress(currentUserId, lessonId);
       const progress = getLessonProgress(currentUserId, lessonId);
@@ -773,9 +777,10 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     : [];
 
   // Render lesson content from Markdown to HTML server-side
-  const contentHtml = lesson.content
-    ? await renderMarkdown(lesson.content)
-    : null;
+  const contentHtml =
+    lesson.content && !refundRequestedAt
+      ? await renderMarkdown(lesson.content)
+      : null;
 
   // Build prev/next navigation
   const allLessons = flattenCourseLessons(courseWithDetails);
@@ -864,6 +869,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     pppPurchaseCountry,
     comments,
     canViewContent,
+    refundRequestedAt,
     canModerate: access.isStaff,
     instructorName: instructor?.name ?? "your instructor",
   };
@@ -1028,6 +1034,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
     pppPurchaseCountry,
     comments,
     canViewContent,
+    refundRequestedAt,
     canModerate,
     instructorName,
   } = loaderData;
@@ -1054,6 +1061,20 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
 
   const quizResult = quizFetcher.data?.quizResult ?? null;
   const isSubmittingQuiz = quizFetcher.state !== "idle";
+
+  if (refundRequestedAt) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center p-6">
+        <div className="max-w-md space-y-6 text-center">
+          <h1 className="text-2xl font-bold">Access Paused</h1>
+          <RefundPausedNotice requestedAt={refundRequestedAt} />
+          <Link to={`/courses/${course.slug}`}>
+            <Button variant="outline">Back to Course</Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   if (pppBlocked) {
     const purchaseCountryName = pppPurchaseCountry
