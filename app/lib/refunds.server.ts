@@ -314,3 +314,43 @@ export function listOpenRefundRequests(): OpenRefundRequestListing[] {
       };
     });
 }
+
+export type DeclineRefundRequestResult =
+  | { ok: true; refundRequest: typeof refunds.$inferSelect }
+  | { ok: false; error: "reason-required" | "not-open" };
+
+/**
+ * Decline an Open Refund Request. The learner keeps their enrollment, so
+ * their access comes straight back (ADR 0001). Eligibility is not re-judged.
+ */
+export function declineRefundRequest(input: {
+  refundRequestId: number;
+  platformAdminId: number;
+  reason: string;
+  now?: Date;
+}): DeclineRefundRequestResult {
+  const reason = input.reason.trim();
+  if (reason === "") return { ok: false, error: "reason-required" };
+
+  const now = input.now ?? new Date();
+  const refundRequest = db
+    .update(refunds)
+    .set({
+      status: RefundStatus.Declined,
+      declineReason: reason,
+      resolvedAt: now.toISOString(),
+      resolvedByUserId: input.platformAdminId,
+    })
+    // Only an Open Refund Request can be decided, so a request decided in
+    // another tab is never decided twice.
+    .where(
+      and(
+        eq(refunds.id, input.refundRequestId),
+        eq(refunds.status, RefundStatus.Open)
+      )
+    )
+    .returning()
+    .get();
+  if (!refundRequest) return { ok: false, error: "not-open" };
+  return { ok: true, refundRequest };
+}

@@ -12,6 +12,7 @@ vi.mock("~/db", () => ({
 }));
 
 import {
+  declineRefundRequest,
   getRefundEligibility,
   listOpenRefundRequests,
   openRefundRequest,
@@ -452,5 +453,126 @@ describe("listOpenRefundRequests", () => {
       older.id,
       newer.id,
     ]);
+  });
+});
+
+describe("declineRefundRequest", () => {
+  const DECIDED_AT = at("2026-03-06T12:00:00.000Z");
+  let platformAdmin: typeof schema.users.$inferSelect;
+  let refundRequestId: number;
+
+  beforeEach(() => {
+    testDb = createTestDb();
+    base = seedBaseData(testDb);
+    platformAdmin = testDb
+      .insert(schema.users)
+      .values({
+        name: "Platform Admin",
+        email: "admin@example.com",
+        role: schema.UserRole.Admin,
+      })
+      .returning()
+      .get();
+    testDb
+      .insert(schema.enrollments)
+      .values({ userId: base.user.id, courseId: base.course.id })
+      .run();
+    buyCourse();
+    const opened = openRefundRequest({
+      userId: base.user.id,
+      courseId: base.course.id,
+      reason: "Not for me.",
+      now: SOON_AFTER,
+    });
+    if (!opened.ok) throw new Error("expected an Open Refund Request");
+    refundRequestId = opened.refundRequest.id;
+  });
+
+  it("records the reason, the deciding Platform Admin and when", () => {
+    const result = declineRefundRequest({
+      refundRequestId,
+      platformAdminId: platformAdmin.id,
+      reason: "You have watched most of the course.",
+      now: DECIDED_AT,
+    });
+    expect(result).toEqual({
+      ok: true,
+      refundRequest: expect.objectContaining({
+        id: refundRequestId,
+        status: schema.RefundStatus.Declined,
+        declineReason: "You have watched most of the course.",
+        resolvedByUserId: platformAdmin.id,
+        resolvedAt: "2026-03-06T12:00:00.000Z",
+        amountRefunded: null,
+      }),
+    });
+  });
+
+  it("refuses to decline without a reason and leaves the request open", () => {
+    const result = declineRefundRequest({
+      refundRequestId,
+      platformAdminId: platformAdmin.id,
+      reason: "   ",
+      now: DECIDED_AT,
+    });
+    expect(result).toEqual({ ok: false, error: "reason-required" });
+    expect(listOpenRefundRequests().map((r) => r.id)).toEqual([
+      refundRequestId,
+    ]);
+  });
+
+  it("refuses a Refund Request that has already been decided", () => {
+    declineRefundRequest({
+      refundRequestId,
+      platformAdminId: platformAdmin.id,
+      reason: "First decision.",
+      now: DECIDED_AT,
+    });
+    const again = declineRefundRequest({
+      refundRequestId,
+      platformAdminId: platformAdmin.id,
+      reason: "Second decision.",
+      now: at("2026-03-07T12:00:00.000Z"),
+    });
+    expect(again).toEqual({ ok: false, error: "not-open" });
+  });
+
+  it("leaves the list once declined", () => {
+    declineRefundRequest({
+      refundRequestId,
+      platformAdminId: platformAdmin.id,
+      reason: "No.",
+      now: DECIDED_AT,
+    });
+    expect(listOpenRefundRequests()).toEqual([]);
+  });
+
+  it("can be declined after the Refund Window has closed", () => {
+    const result = declineRefundRequest({
+      refundRequestId,
+      platformAdminId: platformAdmin.id,
+      reason: "Too late anyway.",
+      now: at("2026-04-30T12:00:00.000Z"),
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("keeps the learner's enrollment and lets them raise a new Refund Request", () => {
+    declineRefundRequest({
+      refundRequestId,
+      platformAdminId: platformAdmin.id,
+      reason: "Try again with more detail.",
+      now: DECIDED_AT,
+    });
+    const enrollments = testDb.select().from(schema.enrollments).all();
+    expect(enrollments).toEqual([
+      expect.objectContaining({
+        userId: base.user.id,
+        courseId: base.course.id,
+      }),
+    ]);
+    expect(
+      getRefundEligibility(base.user.id, base.course.id, DECIDED_AT).eligible
+    ).toBe(true);
   });
 });

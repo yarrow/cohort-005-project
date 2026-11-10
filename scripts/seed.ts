@@ -2772,6 +2772,20 @@ This course is still in draft while the cluster examples are rewritten against t
       updatedAt: daysAgo(6),
     })
     .run();
+  // An earlier Declined Refund Request on the same purchase: Liam was told
+  // why and raised a new one.
+  db.insert(schema.refunds)
+    .values({
+      purchaseId: liamPurchase.id,
+      status: RefundStatus.Declined,
+      reason: "Changed my mind.",
+      declineReason:
+        "Please tell us what was wrong with the course so we can judge your request.",
+      requestedAt: daysAgo(7),
+      resolvedAt: daysAgo(6),
+      resolvedByUserId: admin.id,
+    })
+    .run();
   db.insert(schema.refunds)
     .values({
       purchaseId: liamPurchase.id,

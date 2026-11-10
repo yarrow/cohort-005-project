@@ -21,7 +21,7 @@ vi.mock("~/lib/country.server", () => ({
 }));
 
 import { getAccess } from "./access.server";
-import { openRefundRequest } from "./refunds.server";
+import { declineRefundRequest, openRefundRequest } from "./refunds.server";
 
 const REQUESTED_AT = "2026-03-05T09:30:00.000Z";
 
@@ -127,8 +127,28 @@ describe("getAccess", () => {
   });
 
   it("gives access back once the Refund Request is Declined", async () => {
-    const purchase = enrollAndBuy(base.user.id);
-    raiseRefundRequest(purchase.id, schema.RefundStatus.Declined);
+    enrollAndBuy(base.user.id);
+    const opened = openRefundRequest({
+      userId: base.user.id,
+      courseId: base.course.id,
+      reason: "Not for me",
+      now: new Date(REQUESTED_AT),
+    });
+    if (!opened.ok) throw new Error("expected an Open Refund Request");
+    const platformAdmin = testDb
+      .insert(schema.users)
+      .values({
+        name: "Platform Admin",
+        email: "admin@example.com",
+        role: schema.UserRole.Admin,
+      })
+      .returning()
+      .get();
+    declineRefundRequest({
+      refundRequestId: opened.refundRequest.id,
+      platformAdminId: platformAdmin.id,
+      reason: "You have used most of the course.",
+    });
     signInAs(base.user.id);
 
     const access = await getAccess(request(), base.course.id);
