@@ -18,6 +18,8 @@ import {
 } from "~/db/schema";
 import { eq, and, or, sql } from "drizzle-orm";
 import { getRefundEligibility } from "~/lib/refunds.server";
+import { getAccess } from "~/lib/access.server";
+import { RefundPausedNotice } from "~/components/refund-paused-notice";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -395,11 +397,18 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   let lessonProgressMap: Record<number, string> = {};
   let nextLessonId: number | null = null;
   let refundOffer: { amount: number; lastDayInWindow: string } | null = null;
+  let refundRequestedAt: string | null = null;
 
   if (currentUserId) {
     enrolled = isUserEnrolled(currentUserId, course.id);
 
+    // Access is paused while an Open Refund Request is under review.
     if (enrolled) {
+      const access = await getAccess(request, course.id);
+      refundRequestedAt = access.openRefundRequest?.requestedAt ?? null;
+    }
+
+    if (enrolled && !refundRequestedAt) {
       const eligibility = getRefundEligibility(currentUserId, course.id);
       if (eligibility.eligible) {
         refundOffer = {
@@ -451,6 +460,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     ratingSummary,
     userRating,
     refundOffer,
+    refundRequestedAt,
   };
 }
 
@@ -552,6 +562,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     ratingSummary,
     userRating,
     refundOffer,
+    refundRequestedAt,
   } = loaderData;
   const isInstructor = currentUserId === course.instructorId;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -725,7 +736,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
           <div className="mt-8">
             <CourseContent
               course={course}
-              enrolled={enrolled}
+              enrolled={enrolled && !refundRequestedAt}
               isInstructor={isInstructor}
               lessonProgressMap={lessonProgressMap}
             />
@@ -739,9 +750,11 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
               <h2 className="text-lg font-semibold">
                 {isInstructor
                   ? "Your Course"
-                  : enrolled
-                    ? "Your Progress"
-                    : "Get Started"}
+                  : refundRequestedAt
+                    ? "Access Paused"
+                    : enrolled
+                      ? "Your Progress"
+                      : "Get Started"}
               </h2>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -752,6 +765,8 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                     Manage Course
                   </Button>
                 </Link>
+              ) : refundRequestedAt ? (
+                <RefundPausedNotice requestedAt={refundRequestedAt} />
               ) : enrolled ? (
                 <>
                   <div className="mb-2 flex items-center justify-between text-sm">

@@ -220,6 +220,29 @@ export function openRefundRequest(input: {
   return { ok: true, refundRequest, amount: eligibility.offer.amount };
 }
 
+/**
+ * The Open Refund Request on the learner's latest purchase of a course, if
+ * any. While one exists the learner's access to the course is paused
+ * (ADR 0001).
+ */
+export function findOpenRefundRequestForCourse(
+  userId: number,
+  courseId: number
+): { id: number; requestedAt: string } | undefined {
+  const purchase = getLatestPurchase(userId, courseId);
+  if (!purchase) return undefined;
+  return db
+    .select({ id: refunds.id, requestedAt: refunds.requestedAt })
+    .from(refunds)
+    .where(
+      and(
+        eq(refunds.purchaseId, purchase.id),
+        eq(refunds.status, RefundStatus.Open)
+      )
+    )
+    .get();
+}
+
 export type OpenRefundRequestListing = {
   id: number;
   learner: { id: number; name: string; email: string };
