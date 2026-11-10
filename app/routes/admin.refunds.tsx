@@ -1,14 +1,21 @@
-import { data, isRouteErrorResponse, Link } from "react-router";
+import { useEffect } from "react";
+import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
 import { eq } from "drizzle-orm";
+import { toast } from "sonner";
+import { z } from "zod";
 import { AlertTriangle, ReceiptText } from "lucide-react";
 import type { Route } from "./+types/admin.refunds";
 import { db } from "~/db";
 import { UserRole, users } from "~/db/schema";
 import { getCurrentUserId } from "~/lib/session";
+import { parseFormData } from "~/lib/validation";
 import {
+  approveRefundRequest,
   listOpenRefundRequests,
   REFUND_WINDOW_DAYS,
   type OpenRefundRequestListing,
+  type RefundDecisionRefusal,
+  type RefundDecisionSubject,
 } from "~/lib/refunds.server";
 import { formatPrice } from "~/lib/utils";
 import { Card, CardContent } from "~/components/ui/card";
@@ -25,7 +32,8 @@ function getUserById(id: number) {
   return db.select().from(users).where(eq(users.id, id)).get();
 }
 
-export async function loader({ request }: Route.LoaderArgs) {
+/** Only a Platform Admin may see or decide Refund Requests. */
+async function requirePlatformAdmin(request: Request) {
   const currentUserId = await getCurrentUserId(request);
 
   if (!currentUserId) {
@@ -42,7 +50,89 @@ export async function loader({ request }: Route.LoaderArgs) {
     });
   }
 
+  return currentUser;
+}
+
+export async function loader({ request }: Route.LoaderArgs) {
+  await requirePlatformAdmin(request);
   return { refundRequests: listOpenRefundRequests() };
+}
+
+const refundDecisionSchema = z.discriminatedUnion("intent", [
+  z.object({
+    intent: z.literal("approve"),
+    refundRequestId: z.coerce.number().int(),
+  }),
+]);
+
+const refusalMessages: Record<RefundDecisionRefusal, string> = {
+  "not-found": "That Refund Request no longer exists.",
+  "not-open":
+    "That Refund Request has already been decided, perhaps in another tab.",
+};
+
+/**
+ * Tells the learner their Refund Request was approved. There is no mail
+ * transport wired up yet, so the built message goes to the server log.
+ */
+function buildApprovalEmail({ learner, course }: RefundDecisionSubject) {
+  return {
+    to: learner.email,
+    subject: `Refund approved — ${course.title}`,
+    body: [
+      `Hi ${learner.name},`,
+      "",
+      `We have approved your refund request for "${course.title}".`,
+      "Your access to the course has now ended.",
+      "",
+      "Your progress is kept: if you buy the course again later, you will pick up where you left off.",
+      "",
+      "— The Cadence team",
+    ].join("\n"),
+  };
+}
+
+export async function action({ request }: Route.ActionArgs) {
+  const platformAdmin = await requirePlatformAdmin(request);
+
+  const formData = await request.formData();
+  const parsed = parseFormData(formData, refundDecisionSchema);
+
+  if (!parsed.success) {
+    return data(
+      {
+        ok: false as const,
+        error: Object.values(parsed.errors)[0] ?? "Invalid input.",
+      },
+      { status: 400 }
+    );
+  }
+
+  switch (parsed.data.intent) {
+    case "approve": {
+      const result = approveRefundRequest({
+        refundRequestId: parsed.data.refundRequestId,
+        platformAdminId: platformAdmin.id,
+      });
+
+      if (!result.ok) {
+        return data(
+          { ok: false as const, error: refusalMessages[result.refusedBecause] },
+          { status: 409 }
+        );
+      }
+
+      const email = buildApprovalEmail(result);
+      console.log(
+        `[email] to=${email.to} subject=${email.subject}\n${email.body}`
+      );
+
+      return {
+        ok: true as const,
+        message: `Approved ${result.learner.name}'s Refund Request.`,
+      };
+    }
+  }
 }
 
 const requestedAtFormat = new Intl.DateTimeFormat("en-US", {
@@ -68,7 +158,31 @@ const headings = [
   "Completed",
   "Watched",
   "Days after purchase",
+  "Decision",
 ];
+
+function DecisionCell({ refundRequestId }: { refundRequestId: number }) {
+  const approveFetcher = useFetcher<typeof action>();
+  const approving = approveFetcher.state !== "idle";
+
+  useEffect(() => {
+    if (approveFetcher.state !== "idle" || !approveFetcher.data) return;
+    if (approveFetcher.data.ok) toast.success(approveFetcher.data.message);
+    else toast.error(approveFetcher.data.error);
+  }, [approveFetcher.state, approveFetcher.data]);
+
+  return (
+    <td className="px-4 py-3 text-sm">
+      <approveFetcher.Form method="post">
+        <input type="hidden" name="intent" value="approve" />
+        <input type="hidden" name="refundRequestId" value={refundRequestId} />
+        <Button type="submit" size="sm" disabled={approving}>
+          {approving ? "Approving…" : "Approve"}
+        </Button>
+      </approveFetcher.Form>
+    </td>
+  );
+}
 
 function RefundRequestRow({
   refundRequest: r,
@@ -97,6 +211,7 @@ function RefundRequestRow({
       <td className="px-4 py-3 text-sm">
         {r.daysSincePurchase} of {REFUND_WINDOW_DAYS}
       </td>
+      <DecisionCell refundRequestId={r.id} />
     </tr>
   );
 }
