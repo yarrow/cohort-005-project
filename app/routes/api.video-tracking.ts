@@ -30,8 +30,7 @@ export async function action({ request }: Route.ActionArgs) {
   // Watch time is progress: only someone who may view the lesson records it.
   await requireLessonContentAccess(request, lessonId);
 
-  db
-    .insert(videoWatchEvents)
+  db.insert(videoWatchEvents)
     .values({
       userId: currentUserId,
       lessonId,

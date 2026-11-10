@@ -2,19 +2,25 @@ import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
   coupons,
+  courses,
   enrollments,
   refunds,
   RefundStatus,
   lessonProgress,
-  lessons,
   LessonProgressStatus,
-  modules,
   purchases,
+  users,
   videoWatchEvents,
 } from "~/db/schema";
-import { courses, users } from "~/db/schema";
+import { getCourseLessonIds } from "~/lib/course-lessons.server";
 
 export const REFUND_WINDOW_DAYS = 14;
+
+/** The learner who bought a course, as a Refund Request shows them. */
+export type Learner = { id: number; name: string; email: string };
+
+/** The course a Refund Request is about. */
+export type RefundCourse = { id: number; title: string };
 /** Completing this share of a course's lessons or more blocks a Refund Request. */
 export const REFUND_COMPLETION_LIMIT = 0.5;
 /** Watching this much of a course or more blocks a Refund Request. */
@@ -64,9 +70,11 @@ function getLatestPurchase(userId: number, courseId: number) {
     .get();
 }
 
-function findOpenRefundRequest(purchaseId: number) {
+function findOpenRefundRequest(
+  purchaseId: number
+): { id: number; requestedAt: string } | undefined {
   return db
-    .select({ id: refunds.id })
+    .select({ id: refunds.id, requestedAt: refunds.requestedAt })
     .from(refunds)
     .where(
       and(
@@ -94,16 +102,6 @@ function hasClaimedSeat(purchaseId: number): boolean {
     )
     .get();
   return seat !== undefined;
-}
-
-function getCourseLessonIds(courseId: number): number[] {
-  return db
-    .select({ id: lessons.id })
-    .from(lessons)
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .where(eq(modules.courseId, courseId))
-    .all()
-    .map((row) => row.id);
 }
 
 function countCompletedLessons(userId: number, lessonIds: number[]): number {
@@ -240,22 +238,13 @@ export function findOpenRefundRequestForCourse(
 ): { id: number; requestedAt: string } | undefined {
   const purchase = getLatestPurchase(userId, courseId);
   if (!purchase) return undefined;
-  return db
-    .select({ id: refunds.id, requestedAt: refunds.requestedAt })
-    .from(refunds)
-    .where(
-      and(
-        eq(refunds.purchaseId, purchase.id),
-        eq(refunds.status, RefundStatus.Open)
-      )
-    )
-    .get();
+  return findOpenRefundRequest(purchase.id);
 }
 
 export type OpenRefundRequestListing = {
   id: number;
-  learner: { id: number; name: string; email: string };
-  course: { id: number; title: string };
+  learner: Learner;
+  course: RefundCourse;
   amountPaid: number;
   reason: string;
   requestedAt: string;
@@ -331,8 +320,8 @@ export type RefundDecisionRefusal = "not-found" | "not-open";
 
 /** Who and what a decided Refund Request was about, for the learner's email. */
 export type RefundDecisionSubject = {
-  learner: { id: number; name: string; email: string };
-  course: { id: number; title: string };
+  learner: Learner;
+  course: RefundCourse;
 };
 
 /**
@@ -341,7 +330,7 @@ export type RefundDecisionSubject = {
  * Admin may have decided it in another tab.
  */
 function findRefundRequestToDecide(tx: Transaction, refundRequestId: number) {
-  const found = tx
+  const toDecide = tx
     .select({
       refundRequest: refunds,
       purchase: purchases,
@@ -354,11 +343,11 @@ function findRefundRequestToDecide(tx: Transaction, refundRequestId: number) {
     .innerJoin(courses, eq(purchases.courseId, courses.id))
     .where(eq(refunds.id, refundRequestId))
     .get();
-  if (!found) return { ok: false, refusedBecause: "not-found" } as const;
-  if (found.refundRequest.status !== RefundStatus.Open) {
+  if (!toDecide) return { ok: false, refusedBecause: "not-found" } as const;
+  if (toDecide.refundRequest.status !== RefundStatus.Open) {
     return { ok: false, refusedBecause: "not-open" } as const;
   }
-  return { ok: true, ...found } as const;
+  return { ok: true, ...toDecide } as const;
 }
 
 export type ApproveRefundRequestResult =
@@ -381,9 +370,9 @@ export function approveRefundRequest(input: {
   const now = input.now ?? new Date();
 
   return db.transaction((tx) => {
-    const found = findRefundRequestToDecide(tx, input.refundRequestId);
-    if (!found.ok) return found;
-    const { purchase, learner, course } = found;
+    const toDecide = findRefundRequestToDecide(tx, input.refundRequestId);
+    if (!toDecide.ok) return toDecide;
+    const { purchase, learner, course } = toDecide;
 
     const refundRequest = tx
       .update(refunds)
@@ -452,9 +441,9 @@ export function declineRefundRequest(input: {
   const now = input.now ?? new Date();
 
   return db.transaction((tx) => {
-    const found = findRefundRequestToDecide(tx, input.refundRequestId);
-    if (!found.ok) return found;
-    const { learner, course } = found;
+    const toDecide = findRefundRequestToDecide(tx, input.refundRequestId);
+    if (!toDecide.ok) return toDecide;
+    const { learner, course } = toDecide;
 
     const refundRequest = tx
       .update(refunds)

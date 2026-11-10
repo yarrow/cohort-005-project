@@ -1218,7 +1218,9 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
           {!canViewContent && (
             <Card className="mb-8">
               <CardContent className="py-12 text-center text-muted-foreground">
-                <p className="mb-4">Enroll in this course to view this lesson.</p>
+                <p className="mb-4">
+                  Enroll in this course to view this lesson.
+                </p>
                 <Link to={`/courses/${course.slug}`}>
                   <Button variant="outline">Back to Course</Button>
                 </Link>

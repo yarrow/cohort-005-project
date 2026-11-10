@@ -28,6 +28,7 @@ import {
   loader as lessonLoader,
 } from "./courses.$slug.lessons.$lessonId";
 import { action as videoTrackingAction } from "./api.video-tracking";
+import { loader as courseLoader } from "./courses.$slug";
 import { openRefundRequest } from "~/lib/refunds.server";
 
 const LESSON_CONTENT = "# Secret lesson body";
@@ -144,9 +145,7 @@ describe("a learner whose access is paused by an Open Refund Request", () => {
   it("cannot submit a quiz", async () => {
     const status = await statusOfRefusal(() =>
       lessonAction(
-        lessonArgs(
-          postForm({ intent: "submit-quiz", quizId: String(quiz.id) })
-        )
+        lessonArgs(postForm({ intent: "submit-quiz", quizId: String(quiz.id) }))
       )
     );
 
@@ -167,6 +166,19 @@ describe("a learner whose access is paused by an Open Refund Request", () => {
     );
 
     expect(status).toBe(403);
+  });
+
+  it("is shown the pause on the course page, with no progress or refund offer", async () => {
+    const page = await courseLoader({
+      request: new Request("http://localhost:3000/course"),
+      params: { slug: base.course.slug },
+      context: {},
+    } as unknown as Parameters<typeof courseLoader>[0]);
+
+    expect(page.enrolled).toBe(true);
+    expect(page.openRefundRequest).not.toBeNull();
+    expect(page.refundOffer).toBeNull();
+    expect(page.nextLessonId).toBeNull();
   });
 
   it("is sent none of the lesson's content", async () => {
@@ -199,6 +211,19 @@ describe("an enrolled learner with no Open Refund Request", () => {
       context: {},
     } as unknown as Parameters<typeof lessonAction>[0];
   }
+
+  it("is offered a refund on the course page", async () => {
+    const page = await courseLoader({
+      request: new Request("http://localhost:3000/course"),
+      params: { slug: base.course.slug },
+      context: {},
+    } as unknown as Parameters<typeof courseLoader>[0]);
+
+    expect(page.enrolled).toBe(true);
+    expect(page.openRefundRequest).toBeNull();
+    expect(page.refundOffer).toMatchObject({ amount: 7900 });
+    expect(page.nextLessonId).toBe(lesson.id);
+  });
 
   it("can mark a lesson complete", async () => {
     const result = await lessonAction(
