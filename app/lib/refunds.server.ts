@@ -2,6 +2,7 @@ import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
   coupons,
+  enrollments,
   refunds,
   RefundStatus,
   lessonProgress,
@@ -313,4 +314,92 @@ export function listOpenRefundRequests(): OpenRefundRequestListing[] {
         ),
       };
     });
+}
+
+type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/** Why a Platform Admin's decision on a Refund Request was refused. */
+export type RefundDecisionRefusal = "not-found" | "not-open";
+
+/** Who and what a decided Refund Request was about, for the learner's email. */
+export type RefundDecisionSubject = {
+  learner: { id: number; name: string; email: string };
+  course: { id: number; title: string };
+};
+
+/**
+ * Load a Refund Request a Platform Admin is about to decide, inside the
+ * deciding transaction. Refused unless it is still open: another Platform
+ * Admin may have decided it in another tab.
+ */
+function findRefundRequestToDecide(tx: Transaction, refundRequestId: number) {
+  const found = tx
+    .select({
+      refundRequest: refunds,
+      purchase: purchases,
+      learner: { id: users.id, name: users.name, email: users.email },
+      course: { id: courses.id, title: courses.title },
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(refunds.id, refundRequestId))
+    .get();
+  if (!found) return { ok: false, refusedBecause: "not-found" } as const;
+  if (found.refundRequest.status !== RefundStatus.Open) {
+    return { ok: false, refusedBecause: "not-open" } as const;
+  }
+  return { ok: true, ...found } as const;
+}
+
+export type ApproveRefundRequestResult =
+  | ({
+      ok: true;
+      refundRequest: typeof refunds.$inferSelect;
+    } & RefundDecisionSubject)
+  | { ok: false; refusedBecause: RefundDecisionRefusal };
+
+/**
+ * A Platform Admin approves an Open Refund Request. Everything happens in one
+ * transaction. Eligibility is not judged again: the time a request spends
+ * waiting on us never counts against the learner (ADR 0001).
+ */
+export function approveRefundRequest(input: {
+  refundRequestId: number;
+  platformAdminId: number;
+  now?: Date;
+}): ApproveRefundRequestResult {
+  const now = input.now ?? new Date();
+
+  return db.transaction((tx) => {
+    const found = findRefundRequestToDecide(tx, input.refundRequestId);
+    if (!found.ok) return found;
+    const { purchase, learner, course } = found;
+
+    const refundRequest = tx
+      .update(refunds)
+      .set({
+        status: RefundStatus.Approved,
+        amountRefunded: purchase.amountPaid,
+        resolvedAt: now.toISOString(),
+        resolvedByUserId: input.platformAdminId,
+      })
+      .where(eq(refunds.id, input.refundRequestId))
+      .returning()
+      .get();
+
+    // Access ends for good. Progress, watch history and quiz attempts are
+    // kept, so buying the course again brings them back.
+    tx.delete(enrollments)
+      .where(
+        and(
+          eq(enrollments.userId, purchase.userId),
+          eq(enrollments.courseId, purchase.courseId)
+        )
+      )
+      .run();
+
+    return { ok: true, refundRequest, learner, course } as const;
+  });
 }
