@@ -1,0 +1,1 @@
+ALTER TABLE `coupons` ADD `revoked_at` text;

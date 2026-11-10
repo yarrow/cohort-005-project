@@ -5,10 +5,18 @@ import { z } from "zod";
 import type { Route } from "./+types/redeem.$code";
 import { getCurrentUserId } from "~/lib/session";
 import { resolveCountry } from "~/lib/country.server";
+import { hasOpenRefundRequest } from "~/lib/refunds.server";
 import { parseParams, parseFormData } from "~/lib/validation";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
-import { Ticket, AlertCircle, CheckCircle2, Globe } from "lucide-react";
+import {
+  Ticket,
+  AlertCircle,
+  CheckCircle2,
+  Globe,
+  Ban,
+  Hourglass,
+} from "lucide-react";
 import { data } from "react-router";
 import { db } from "~/db";
 import { purchases, coupons, courses, enrollments } from "~/db/schema";
@@ -34,6 +42,11 @@ function isUserEnrolled(userId: number, courseId: number) {
   return !!existing;
 }
 
+const REVOKED_SEAT_MESSAGE =
+  "This seat has been revoked because the team licence was refunded, so it can no longer be claimed.";
+const UNDER_REVIEW_MESSAGE =
+  "This team licence is under review while a refund request is open. Please try again later: if the request is declined, the seat can be claimed again.";
+
 type RedeemResult =
   | { ok: true; enrollment: typeof enrollments.$inferSelect }
   | { ok: false; error: string };
@@ -50,6 +63,14 @@ function redeemCoupon(
 
   if (coupon.redeemedByUserId !== null) {
     return { ok: false, error: "Coupon has already been redeemed" };
+  }
+
+  if (coupon.revokedAt !== null) {
+    return { ok: false, error: REVOKED_SEAT_MESSAGE };
+  }
+
+  if (hasOpenRefundRequest(coupon.purchaseId)) {
+    return { ok: false, error: UNDER_REVIEW_MESSAGE };
   }
 
   const existingEnrollment = db
@@ -136,10 +157,13 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 
   const alreadyRedeemed = coupon.redeemedByUserId !== null;
   const alreadyEnrolled = isUserEnrolled(currentUserId, coupon.courseId);
+  const revoked = !alreadyRedeemed && coupon.revokedAt !== null;
+  const underReview =
+    !alreadyRedeemed && !revoked && hasOpenRefundRequest(coupon.purchaseId);
 
   // Check country mismatch upfront so we can show a clear message
   let countryMismatch = false;
-  if (!alreadyRedeemed && !alreadyEnrolled) {
+  if (!alreadyRedeemed && !alreadyEnrolled && !revoked && !underReview) {
     const userCountry = await resolveCountry(request);
     const purchase = db
       .select()
@@ -156,6 +180,8 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     code,
     alreadyRedeemed,
     alreadyEnrolled,
+    revoked,
+    underReview,
     countryMismatch,
   };
 }
@@ -194,8 +220,15 @@ export default function Redeem({
   loaderData,
   actionData,
 }: Route.ComponentProps) {
-  const { course, code, alreadyRedeemed, alreadyEnrolled, countryMismatch } =
-    loaderData;
+  const {
+    course,
+    code,
+    alreadyRedeemed,
+    alreadyEnrolled,
+    revoked,
+    underReview,
+    countryMismatch,
+  } = loaderData;
   const fetcher = useFetcher();
   const isSubmitting = fetcher.state !== "idle";
 
@@ -208,7 +241,6 @@ export default function Redeem({
   }, [fetcher.data, actionData]);
 
   // Determine which state to show
-  const canRedeem = !alreadyRedeemed && !alreadyEnrolled && !countryMismatch;
 
   return (
     <div className="mx-auto max-w-2xl p-6 lg:p-8">
@@ -242,6 +274,16 @@ export default function Redeem({
                 shared this link for a new coupon.
               </p>
             </div>
+          ) : revoked ? (
+            <div className="rounded-lg bg-destructive/10 p-4">
+              <div className="flex items-center justify-center gap-2 text-destructive">
+                <Ban className="size-5" />
+                <span className="font-medium">This seat has been revoked</span>
+              </div>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {REVOKED_SEAT_MESSAGE}
+              </p>
+            </div>
           ) : alreadyEnrolled ? (
             <div className="rounded-lg bg-green-50 p-4 dark:bg-green-900/20">
               <div className="flex items-center justify-center gap-2 text-green-700 dark:text-green-400">
@@ -259,6 +301,16 @@ export default function Redeem({
                   Go to Course
                 </Button>
               </Link>
+            </div>
+          ) : underReview ? (
+            <div className="rounded-lg bg-amber-50 p-4 dark:bg-amber-900/20">
+              <div className="flex items-center justify-center gap-2 text-amber-700 dark:text-amber-400">
+                <Hourglass className="size-5" />
+                <span className="font-medium">Licence under review</span>
+              </div>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {UNDER_REVIEW_MESSAGE}
+              </p>
             </div>
           ) : countryMismatch ? (
             <div className="rounded-lg bg-amber-50 p-4 dark:bg-amber-900/20">

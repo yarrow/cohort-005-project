@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { eq, gte, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
+import { and, eq, gte, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
@@ -2715,7 +2715,8 @@ This course is still in draft while the cluster examples are rewritten against t
   );
 
   // Four seats on Design Systems, bought during launch week, none redeemed yet.
-  createTeamPurchase(
+  // Marta has asked for a Refund (below), so its Seats are under review.
+  const novakLicence = createTeamPurchase(
     "marta.novak@student.dev",
     course3,
     4,
@@ -2796,6 +2797,52 @@ This course is still in draft while the cluster examples are rewritten against t
     .run();
 
   console.log("Created Liam's Refund Request.");
+
+  // ─── Refund Requests on Team Licences ───
+  // Marta's licence has an Open Refund Request, so none of its Seats can be
+  // claimed until it is decided. James's licence was refunded: its unclaimed
+  // Seats are Revoked Seats, its one claimed Seat stays with Sophia.
+  db.insert(schema.refunds)
+    .values({
+      purchaseId: novakLicence.purchase.id,
+      status: RefundStatus.Open,
+      reason: "Our design team was cut, we no longer need the seats.",
+      requestedAt: daysAgo(2),
+    })
+    .run();
+
+  const parkLicence = createTeamPurchase(
+    "james.park@student.dev",
+    course3,
+    3,
+    "TEAM-DS-PARK",
+    10,
+    ["sophia.davis@student.dev"]
+  );
+  db.insert(schema.refunds)
+    .values({
+      purchaseId: parkLicence.purchase.id,
+      status: RefundStatus.Approved,
+      reason: "Bought these by mistake, only one of us needed it.",
+      amountRefunded: parkLicence.purchase.amountPaid,
+      requestedAt: daysAgo(9),
+      resolvedAt: daysAgo(8),
+      resolvedByUserId: admin.id,
+    })
+    .run();
+  db.update(schema.coupons)
+    .set({ revokedAt: daysAgo(8) })
+    .where(
+      and(
+        eq(schema.coupons.purchaseId, parkLicence.purchase.id),
+        isNull(schema.coupons.redeemedAt)
+      )
+    )
+    .run();
+
+  console.log(
+    `Created Refund Requests on 2 Team Licences (${countRows(schema.coupons, isNotNull(schema.coupons.revokedAt))} Revoked Seats).`
+  );
 
   // ─── Flush watch events ───
   // Batched: the heartbeat makes these by far the largest table, and one
