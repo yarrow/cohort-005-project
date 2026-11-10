@@ -11,7 +11,11 @@ vi.mock("~/db", () => ({
   },
 }));
 
-import { getRefundEligibility, openRefundRequest } from "./refunds.server";
+import {
+  getRefundEligibility,
+  listOpenRefundRequests,
+  openRefundRequest,
+} from "./refunds.server";
 
 const PURCHASED_AT = "2026-03-01T10:00:00.000Z";
 
@@ -332,5 +336,121 @@ describe("openRefundRequest", () => {
 
   it("refuses a learner with no purchase", () => {
     expect(open()).toEqual({ ok: false, blockedBy: "no-purchase" });
+  });
+});
+
+describe("listOpenRefundRequests", () => {
+  beforeEach(() => {
+    testDb = createTestDb();
+    base = seedBaseData(testDb);
+  });
+
+  function requestRefund(
+    purchaseId: number,
+    requestedAt: string,
+    status: schema.RefundStatus = schema.RefundStatus.Open
+  ) {
+    return testDb
+      .insert(schema.refunds)
+      .values({
+        purchaseId,
+        reason: "The course was not what I expected.",
+        status,
+        requestedAt,
+      })
+      .returning()
+      .get();
+  }
+
+  it("lists an Open Refund Request with who asked, for what, and why", () => {
+    const purchase = buyCourse(7900);
+    const request = requestRefund(purchase.id, "2026-03-04T09:00:00.000Z");
+    expect(listOpenRefundRequests()).toEqual([
+      expect.objectContaining({
+        id: request.id,
+        learner: {
+          id: base.user.id,
+          name: "Test User",
+          email: "test@example.com",
+        },
+        course: { id: base.course.id, title: "Test Course" },
+        amountPaid: 7900,
+        reason: "The course was not what I expected.",
+        requestedAt: "2026-03-04T09:00:00.000Z",
+      }),
+    ]);
+  });
+
+  it("shows how much of the course the learner has completed and watched", () => {
+    const purchase = buyCourse();
+    const lessons = addLessons(4);
+    completeLessons([lessons[0].id]);
+    // Only the furthest point reached in each lesson counts.
+    watch(lessons[0].id, 1800);
+    watch(lessons[0].id, 600);
+    watch(lessons[1].id, 900);
+    requestRefund(purchase.id, "2026-03-04T09:00:00.000Z");
+    expect(listOpenRefundRequests()).toEqual([
+      expect.objectContaining({
+        lessonsCompleted: 1,
+        totalLessons: 4,
+        secondsWatched: 2700,
+      }),
+    ]);
+  });
+
+  it("counts days from purchase to request in calendar days", () => {
+    // Bought late on the 1st, asked early on the 4th: three days in.
+    const purchase = buyCourse(7900, "2026-03-01T23:30:00.000Z");
+    requestRefund(purchase.id, "2026-03-04T00:30:00.000Z");
+    expect(listOpenRefundRequests()).toEqual([
+      expect.objectContaining({
+        purchasedAt: "2026-03-01T23:30:00.000Z",
+        daysSincePurchase: 3,
+      }),
+    ]);
+  });
+
+  it("leaves out Approved and Declined Refund Requests", () => {
+    const purchase = buyCourse();
+    requestRefund(
+      purchase.id,
+      "2026-03-02T09:00:00.000Z",
+      schema.RefundStatus.Declined
+    );
+    requestRefund(
+      purchase.id,
+      "2026-03-03T09:00:00.000Z",
+      schema.RefundStatus.Approved
+    );
+    expect(listOpenRefundRequests()).toEqual([]);
+  });
+
+  it("lists the oldest Open Refund Request first", () => {
+    const otherLearner = testDb
+      .insert(schema.users)
+      .values({
+        name: "Other Learner",
+        email: "other@example.com",
+        role: schema.UserRole.Student,
+      })
+      .returning()
+      .get();
+    const otherPurchase = testDb
+      .insert(schema.purchases)
+      .values({
+        userId: otherLearner.id,
+        courseId: base.course.id,
+        amountPaid: 7900,
+        createdAt: PURCHASED_AT,
+      })
+      .returning()
+      .get();
+    const newer = requestRefund(buyCourse().id, "2026-03-05T09:00:00.000Z");
+    const older = requestRefund(otherPurchase.id, "2026-03-03T09:00:00.000Z");
+    expect(listOpenRefundRequests().map((r) => r.id)).toEqual([
+      older.id,
+      newer.id,
+    ]);
   });
 });
