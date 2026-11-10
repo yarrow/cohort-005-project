@@ -21,7 +21,11 @@ vi.mock("~/lib/country.server", () => ({
 }));
 
 import { getAccess } from "./access.server";
-import { declineRefundRequest, openRefundRequest } from "./refunds.server";
+import {
+  approveRefundRequest,
+  declineRefundRequest,
+  openRefundRequest,
+} from "./refunds.server";
 
 const REQUESTED_AT = "2026-03-05T09:30:00.000Z";
 
@@ -213,10 +217,28 @@ describe("getAccess", () => {
     ]);
   });
 
-  it("ends access once the Refund Request is Approved and the enrollment removed", async () => {
-    const purchase = enrollAndBuy(base.user.id);
-    raiseRefundRequest(purchase.id, schema.RefundStatus.Approved);
-    testDb.delete(schema.enrollments).run();
+  it("ends access once the Refund Request is Approved", async () => {
+    enrollAndBuy(base.user.id);
+    const opened = openRefundRequest({
+      userId: base.user.id,
+      courseId: base.course.id,
+      reason: "Not what I expected",
+      now: new Date(REQUESTED_AT),
+    });
+    if (!opened.ok) throw new Error(`could not open: ${opened.blockedBy}`);
+    const platformAdmin = testDb
+      .insert(schema.users)
+      .values({
+        name: "Platform Admin",
+        email: "admin@example.com",
+        role: schema.UserRole.Admin,
+      })
+      .returning()
+      .get();
+    approveRefundRequest({
+      refundRequestId: opened.refundRequest.id,
+      platformAdminId: platformAdmin.id,
+    });
     signInAs(base.user.id);
 
     const access = await getAccess(request(), base.course.id);

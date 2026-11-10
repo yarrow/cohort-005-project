@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
+import { eq } from "drizzle-orm";
 
 let testDb: ReturnType<typeof createTestDb>;
 let base: ReturnType<typeof seedBaseData>;
@@ -12,6 +13,7 @@ vi.mock("~/db", () => ({
 }));
 
 import {
+  approveRefundRequest,
   declineRefundRequest,
   getRefundEligibility,
   listOpenRefundRequests,
@@ -495,7 +497,7 @@ describe("declineRefundRequest", () => {
       reason: "You have watched most of the course.",
       now: DECIDED_AT,
     });
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       ok: true,
       refundRequest: expect.objectContaining({
         id: refundRequestId,
@@ -515,7 +517,7 @@ describe("declineRefundRequest", () => {
       reason: "   ",
       now: DECIDED_AT,
     });
-    expect(result).toEqual({ ok: false, error: "reason-required" });
+    expect(result).toEqual({ ok: false, refusedBecause: "reason-required" });
     expect(listOpenRefundRequests().map((r) => r.id)).toEqual([
       refundRequestId,
     ]);
@@ -534,7 +536,7 @@ describe("declineRefundRequest", () => {
       reason: "Second decision.",
       now: at("2026-03-07T12:00:00.000Z"),
     });
-    expect(again).toEqual({ ok: false, error: "not-open" });
+    expect(again).toEqual({ ok: false, refusedBecause: "not-open" });
   });
 
   it("leaves the list once declined", () => {
@@ -557,6 +559,36 @@ describe("declineRefundRequest", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("says who to tell and about which course", () => {
+    expect(
+      declineRefundRequest({
+        refundRequestId,
+        platformAdminId: platformAdmin.id,
+        reason: "No.",
+        now: DECIDED_AT,
+      })
+    ).toMatchObject({
+      ok: true,
+      learner: {
+        id: base.user.id,
+        name: "Test User",
+        email: "test@example.com",
+      },
+      course: { id: base.course.id, title: "Test Course" },
+    });
+  });
+
+  it("refuses a Refund Request that does not exist", () => {
+    expect(
+      declineRefundRequest({
+        refundRequestId: 9999,
+        platformAdminId: platformAdmin.id,
+        reason: "No.",
+        now: DECIDED_AT,
+      })
+    ).toEqual({ ok: false, refusedBecause: "not-found" });
+  });
+
   it("keeps the learner's enrollment and lets them raise a new Refund Request", () => {
     declineRefundRequest({
       refundRequestId,
@@ -574,5 +606,163 @@ describe("declineRefundRequest", () => {
     expect(
       getRefundEligibility(base.user.id, base.course.id, DECIDED_AT).eligible
     ).toBe(true);
+  });
+});
+
+describe("approveRefundRequest", () => {
+  let platformAdmin: typeof schema.users.$inferSelect;
+
+  beforeEach(() => {
+    testDb = createTestDb();
+    base = seedBaseData(testDb);
+    platformAdmin = testDb
+      .insert(schema.users)
+      .values({
+        name: "Platform Admin",
+        email: "admin@example.com",
+        role: schema.UserRole.Admin,
+      })
+      .returning()
+      .get();
+  });
+
+  const DECIDED_AT = at("2026-03-05T12:00:00.000Z");
+
+  function enrol() {
+    testDb
+      .insert(schema.enrollments)
+      .values({ userId: base.user.id, courseId: base.course.id })
+      .run();
+  }
+
+  function buyEnrolAndAsk() {
+    buyCourse(7900);
+    enrol();
+    const result = openRefundRequest({
+      userId: base.user.id,
+      courseId: base.course.id,
+      reason: "Not what I expected.",
+      now: SOON_AFTER,
+    });
+    if (!result.ok) throw new Error(`could not open: ${result.blockedBy}`);
+    return result.refundRequest;
+  }
+
+  function approve(refundRequestId: number, now = DECIDED_AT) {
+    return approveRefundRequest({
+      refundRequestId,
+      platformAdminId: platformAdmin.id,
+      now,
+    });
+  }
+
+  function enrollmentsOfLearner() {
+    return testDb
+      .select()
+      .from(schema.enrollments)
+      .where(eq(schema.enrollments.userId, base.user.id))
+      .all();
+  }
+
+  it("records the decision, the deciding Platform Admin, the time and the full amount paid", () => {
+    const request = buyEnrolAndAsk();
+    const result = approve(request.id);
+    expect(result).toMatchObject({
+      ok: true,
+      refundRequest: {
+        id: request.id,
+        status: schema.RefundStatus.Approved,
+        resolvedByUserId: platformAdmin.id,
+        resolvedAt: "2026-03-05T12:00:00.000Z",
+        amountRefunded: 7900,
+      },
+    });
+  });
+
+  it("says who to tell and about which course", () => {
+    const request = buyEnrolAndAsk();
+    expect(approve(request.id)).toMatchObject({
+      ok: true,
+      learner: {
+        id: base.user.id,
+        name: "Test User",
+        email: "test@example.com",
+      },
+      course: { id: base.course.id, title: "Test Course" },
+    });
+  });
+
+  it("ends the learner's enrollment in the course", () => {
+    const request = buyEnrolAndAsk();
+    approve(request.id);
+    expect(enrollmentsOfLearner()).toEqual([]);
+  });
+
+  it("refuses a Refund Request that has already been decided, and changes nothing", () => {
+    const request = buyEnrolAndAsk();
+    approve(request.id);
+    // The learner buys again; a second approval from a stale tab must not
+    // end their new enrollment or overwrite the first decision.
+    enrol();
+    expect(approve(request.id, at("2026-03-06T12:00:00.000Z"))).toEqual({
+      ok: false,
+      refusedBecause: "not-open",
+    });
+    expect(enrollmentsOfLearner()).toHaveLength(1);
+    const stored = testDb
+      .select()
+      .from(schema.refunds)
+      .where(eq(schema.refunds.id, request.id))
+      .get();
+    expect(stored?.resolvedAt).toBe("2026-03-05T12:00:00.000Z");
+  });
+
+  it("keeps lesson progress, video watch history and quiz attempts", () => {
+    const lessons = addLessons(4);
+    const request = buyEnrolAndAsk();
+    completeLessons([lessons[0].id]);
+    watch(lessons[0].id, 600);
+    const quiz = testDb
+      .insert(schema.quizzes)
+      .values({ lessonId: lessons[0].id, title: "Quiz", passingScore: 0.7 })
+      .returning()
+      .get();
+    testDb
+      .insert(schema.quizAttempts)
+      .values({ userId: base.user.id, quizId: quiz.id, score: 1, passed: true })
+      .run();
+
+    approve(request.id);
+
+    const learnerRows = (
+      table:
+        | typeof schema.lessonProgress
+        | typeof schema.videoWatchEvents
+        | typeof schema.quizAttempts
+    ) =>
+      testDb.select().from(table).where(eq(table.userId, base.user.id)).all();
+    expect(learnerRows(schema.lessonProgress)).toHaveLength(1);
+    expect(learnerRows(schema.videoWatchEvents)).toHaveLength(1);
+    expect(learnerRows(schema.quizAttempts)).toHaveLength(1);
+  });
+
+  it("approves a Refund Request after its Refund Window has closed", () => {
+    const request = buyEnrolAndAsk();
+    const result = approve(request.id, at("2026-04-30T12:00:00.000Z"));
+    expect(result).toMatchObject({
+      ok: true,
+      refundRequest: { status: schema.RefundStatus.Approved },
+    });
+    expect(enrollmentsOfLearner()).toEqual([]);
+  });
+
+  it("takes the approved Refund Request off the list of Open Refund Requests", () => {
+    const request = buyEnrolAndAsk();
+    approve(request.id);
+    expect(listOpenRefundRequests()).toEqual([]);
+  });
+
+  it("refuses a Refund Request that does not exist", () => {
+    expect(approve(9999)).toEqual({ ok: false, refusedBecause: "not-found" });
   });
 });

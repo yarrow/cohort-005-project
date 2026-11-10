@@ -1,19 +1,24 @@
+import { useEffect } from "react";
 import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
 import { eq } from "drizzle-orm";
+import { toast } from "sonner";
 import { z } from "zod";
 import { AlertTriangle, ReceiptText } from "lucide-react";
 import type { Route } from "./+types/admin.refunds";
 import { db } from "~/db";
 import { UserRole, users } from "~/db/schema";
 import { getCurrentUserId } from "~/lib/session";
+import { parseFormData } from "~/lib/validation";
 import {
+  approveRefundRequest,
   declineRefundRequest,
   listOpenRefundRequests,
   REFUND_WINDOW_DAYS,
   type OpenRefundRequestListing,
+  type RefundDecisionRefusal,
+  type RefundDecisionSubject,
 } from "~/lib/refunds.server";
 import { formatPrice } from "~/lib/utils";
-import { parseFormData } from "~/lib/validation";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
@@ -29,7 +34,8 @@ function getUserById(id: number) {
   return db.select().from(users).where(eq(users.id, id)).get();
 }
 
-export async function loader({ request }: Route.LoaderArgs) {
+/** Only a Platform Admin may see or decide Refund Requests. */
+async function requirePlatformAdmin(request: Request) {
   const currentUserId = await getCurrentUserId(request);
 
   if (!currentUserId) {
@@ -46,64 +52,86 @@ export async function loader({ request }: Route.LoaderArgs) {
     });
   }
 
-  return { refundRequests: listOpenRefundRequests() };
-}
-
-async function requirePlatformAdmin(request: Request) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("Select a user from the DevUI panel to decide refunds.", {
-      status: 401,
-    });
-  }
-
-  const currentUser = getUserById(currentUserId);
-
-  if (!currentUser || currentUser.role !== UserRole.Admin) {
-    throw data("Only Platform Admins can decide Refund Requests.", {
-      status: 403,
-    });
-  }
-
   return currentUser;
 }
 
-const declineSchema = z.object({
-  refundRequestId: z.coerce.number().int().positive(),
-  reason: z
-    .string()
-    .trim()
-    .min(1, "Write a reason. The learner will see it.")
-    .max(1000, "Please keep the reason under 1000 characters."),
-});
+export async function loader({ request }: Route.LoaderArgs) {
+  await requirePlatformAdmin(request);
+  return { refundRequests: listOpenRefundRequests() };
+}
 
-export type DecisionActionData = {
-  intent: string;
-  refundRequestId?: number;
-  errors?: Record<string, string>;
+const refundDecisionSchema = z.discriminatedUnion("intent", [
+  z.object({
+    intent: z.literal("approve"),
+    refundRequestId: z.coerce.number().int(),
+  }),
+  z.object({
+    intent: z.literal("decline"),
+    refundRequestId: z.coerce.number().int(),
+    reason: z
+      .string()
+      .trim()
+      .min(1, "Write a reason for declining. The learner will see it.")
+      .max(1000, "Please keep the reason under 1000 characters."),
+  }),
+]);
+
+const refusalMessages: Record<RefundDecisionRefusal, string> = {
+  "not-found": "That Refund Request no longer exists.",
+  "not-open":
+    "That Refund Request has already been decided, perhaps in another tab.",
 };
 
+/** A refused decision. `fieldErrors` are shown inline, next to the field. */
+type DecisionRefused = {
+  ok: false;
+  error: string;
+  fieldErrors?: Record<string, string>;
+};
+
+const REASON_REQUIRED =
+  "Write a reason for declining. The learner will see it.";
+
 /**
- * The email the learner gets when their Refund Request is declined. There is
- * no mail transport wired up yet, so the built message goes to the server log.
+ * Tells the learner their Refund Request was approved. There is no mail
+ * transport wired up yet, so the built message goes to the server log.
  */
-function buildDeclineEmail(input: {
-  learnerName: string;
-  learnerEmail: string;
-  courseTitle: string;
-  reason: string;
-}) {
+function buildApprovalEmail({ learner, course }: RefundDecisionSubject) {
   return {
-    to: input.learnerEmail,
-    subject: `Refund request declined — ${input.courseTitle}`,
+    to: learner.email,
+    subject: `Refund approved — ${course.title}`,
     body: [
-      `Hi ${input.learnerName},`,
+      `Hi ${learner.name},`,
       "",
-      `We have reviewed your refund request for "${input.courseTitle}" and declined it.`,
+      `We have approved your refund request for "${course.title}".`,
+      "Your access to the course has now ended.",
+      "",
+      "Your progress is kept: if you buy the course again later, you will pick up where you left off.",
+      "",
+      "— The Cadence team",
+    ].join("\n"),
+  };
+}
+
+/**
+ * Tells the learner their Refund Request was declined, and why. There is no
+ * mail transport wired up yet, so the built message goes to the server log.
+ */
+function buildDeclineEmail({
+  learner,
+  course,
+  reason,
+}: RefundDecisionSubject & { reason: string }) {
+  return {
+    to: learner.email,
+    subject: `Refund declined — ${course.title}`,
+    body: [
+      `Hi ${learner.name},`,
+      "",
+      `We have reviewed your refund request for "${course.title}" and declined it.`,
       "",
       "Our reason:",
-      input.reason,
+      reason,
       "",
       "Your access to the course is back, with your progress exactly as you left it.",
       "",
@@ -114,79 +142,84 @@ function buildDeclineEmail(input: {
   };
 }
 
-async function decline(formData: FormData, platformAdminId: number) {
-  const parsed = parseFormData(formData, declineSchema);
-  const refundRequestId = Number(formData.get("refundRequestId")) || undefined;
-
-  if (!parsed.success) {
-    return data<DecisionActionData>(
-      { intent: "decline", refundRequestId, errors: parsed.errors },
-      { status: 400 }
-    );
-  }
-
-  const notOpen = data<DecisionActionData>(
-    {
-      intent: "decline",
-      refundRequestId,
-      errors: {
-        form: "This Refund Request is no longer open. It may have been decided in another tab.",
-      },
-    },
-    { status: 409 }
-  );
-
-  // Look the request up before deciding it: once declined it leaves the list.
-  const listing = listOpenRefundRequests().find(
-    (r) => r.id === parsed.data.refundRequestId
-  );
-  if (!listing) return notOpen;
-
-  const result = declineRefundRequest({
-    refundRequestId: parsed.data.refundRequestId,
-    platformAdminId,
-    reason: parsed.data.reason,
-  });
-
-  if (!result.ok) {
-    if (result.error === "not-open") return notOpen;
-    return data<DecisionActionData>(
-      {
-        intent: "decline",
-        refundRequestId,
-        errors: { reason: "Write a reason. The learner will see it." },
-      },
-      { status: 400 }
-    );
-  }
-
-  const email = buildDeclineEmail({
-    learnerName: listing.learner.name,
-    learnerEmail: listing.learner.email,
-    courseTitle: listing.course.title,
-    reason: parsed.data.reason,
-  });
-
-  console.log(
-    `[email] to=${email.to} subject=${email.subject}\n${email.body}`
-  );
-
-  return data<DecisionActionData>({ intent: "decline", refundRequestId });
-}
-
-/**
- * Every decision posts here with a hidden `intent` field naming it.
- */
 export async function action({ request }: Route.ActionArgs) {
   const platformAdmin = await requirePlatformAdmin(request);
-  const formData = await request.formData();
-  const intent = String(formData.get("intent") ?? "");
 
-  switch (intent) {
-    case "decline":
-      return decline(formData, platformAdmin.id);
-    default:
-      throw data(`Unknown decision: "${intent}".`, { status: 400 });
+  const formData = await request.formData();
+  const parsed = parseFormData(formData, refundDecisionSchema);
+
+  if (!parsed.success) {
+    return data<DecisionRefused>(
+      {
+        ok: false,
+        error: Object.values(parsed.errors)[0] ?? "Invalid input.",
+        fieldErrors: parsed.errors,
+      },
+      { status: 400 }
+    );
+  }
+
+  switch (parsed.data.intent) {
+    case "approve": {
+      const result = approveRefundRequest({
+        refundRequestId: parsed.data.refundRequestId,
+        platformAdminId: platformAdmin.id,
+      });
+
+      if (!result.ok) {
+        return data<DecisionRefused>(
+          { ok: false, error: refusalMessages[result.refusedBecause] },
+          { status: 409 }
+        );
+      }
+
+      const email = buildApprovalEmail(result);
+      console.log(
+        `[email] to=${email.to} subject=${email.subject}\n${email.body}`
+      );
+
+      return {
+        ok: true as const,
+        message: `Approved ${result.learner.name}'s Refund Request.`,
+      };
+    }
+    case "decline": {
+      const result = declineRefundRequest({
+        refundRequestId: parsed.data.refundRequestId,
+        platformAdminId: platformAdmin.id,
+        reason: parsed.data.reason,
+      });
+
+      if (!result.ok) {
+        if (result.refusedBecause === "reason-required") {
+          return data<DecisionRefused>(
+            {
+              ok: false,
+              error: REASON_REQUIRED,
+              fieldErrors: { reason: REASON_REQUIRED },
+            },
+            { status: 400 }
+          );
+        }
+        return data<DecisionRefused>(
+          { ok: false, error: refusalMessages[result.refusedBecause] },
+          { status: 409 }
+        );
+      }
+
+      const email = buildDeclineEmail({
+        ...result,
+        reason: result.refundRequest.declineReason ?? parsed.data.reason,
+      });
+      console.log(
+        `[email] to=${email.to} subject=${email.subject}\n${email.body}`
+      );
+
+      return {
+        ok: true as const,
+        message: `Declined ${result.learner.name}'s Refund Request.`,
+      };
+    }
   }
 }
 
@@ -216,46 +249,76 @@ const headings = [
   "Decision",
 ];
 
-function DeclineForm({ refundRequestId }: { refundRequestId: number }) {
-  const fetcher = useFetcher<DecisionActionData>();
-  const errors =
-    fetcher.data?.intent === "decline" ? fetcher.data.errors : undefined;
-  const reasonErrorId = `decline-reason-error-${refundRequestId}`;
+function DecisionCell({ refundRequestId }: { refundRequestId: number }) {
+  const approveFetcher = useFetcher<typeof action>();
+  const approving = approveFetcher.state !== "idle";
+
+  useEffect(() => {
+    if (approveFetcher.state !== "idle" || !approveFetcher.data) return;
+    if (approveFetcher.data.ok) toast.success(approveFetcher.data.message);
+    else toast.error(approveFetcher.data.error);
+  }, [approveFetcher.state, approveFetcher.data]);
 
   return (
-    <fetcher.Form method="post" className="flex min-w-56 flex-col gap-2">
+    <td className="px-4 py-3 text-sm">
+      <approveFetcher.Form method="post">
+        <input type="hidden" name="intent" value="approve" />
+        <input type="hidden" name="refundRequestId" value={refundRequestId} />
+        <Button type="submit" size="sm" disabled={approving}>
+          {approving ? "Approving…" : "Approve"}
+        </Button>
+      </approveFetcher.Form>
+      <DeclineForm refundRequestId={refundRequestId} />
+    </td>
+  );
+}
+
+function DeclineForm({ refundRequestId }: { refundRequestId: number }) {
+  const declineFetcher = useFetcher<typeof action>();
+  const declining = declineFetcher.state !== "idle";
+  const result = declineFetcher.state === "idle" ? declineFetcher.data : null;
+  const reasonError =
+    result && !result.ok ? result.fieldErrors?.reason : undefined;
+  const reasonId = `decline-reason-${refundRequestId}`;
+  const reasonErrorId = `${reasonId}-error`;
+
+  useEffect(() => {
+    if (declineFetcher.state !== "idle" || !declineFetcher.data) return;
+    if (declineFetcher.data.ok) toast.success(declineFetcher.data.message);
+    // A missing reason is shown inline, next to the field.
+    else if (!declineFetcher.data.fieldErrors)
+      toast.error(declineFetcher.data.error);
+  }, [declineFetcher.state, declineFetcher.data]);
+
+  return (
+    <declineFetcher.Form
+      method="post"
+      className="mt-3 flex min-w-56 flex-col gap-2"
+    >
       <input type="hidden" name="intent" value="decline" />
       <input type="hidden" name="refundRequestId" value={refundRequestId} />
       <label
-        htmlFor={`decline-reason-${refundRequestId}`}
+        htmlFor={reasonId}
         className="text-xs font-medium text-muted-foreground"
       >
         Reason for declining
       </label>
       <Textarea
-        id={`decline-reason-${refundRequestId}`}
+        id={reasonId}
         name="reason"
         placeholder="The learner will see this."
-        aria-invalid={errors?.reason ? true : undefined}
-        aria-describedby={errors?.reason ? reasonErrorId : undefined}
+        aria-invalid={reasonError ? true : undefined}
+        aria-describedby={reasonError ? reasonErrorId : undefined}
       />
-      {errors?.reason && (
+      {reasonError && (
         <p id={reasonErrorId} className="text-xs text-destructive">
-          {errors.reason}
+          {reasonError}
         </p>
       )}
-      {errors?.form && (
-        <p className="text-xs text-destructive">{errors.form}</p>
-      )}
-      <Button
-        type="submit"
-        variant="outline"
-        size="sm"
-        disabled={fetcher.state !== "idle"}
-      >
-        Decline
+      <Button type="submit" size="sm" variant="outline" disabled={declining}>
+        {declining ? "Declining…" : "Decline"}
       </Button>
-    </fetcher.Form>
+    </declineFetcher.Form>
   );
 }
 
@@ -286,9 +349,7 @@ function RefundRequestRow({
       <td className="px-4 py-3 text-sm">
         {r.daysSincePurchase} of {REFUND_WINDOW_DAYS}
       </td>
-      <td className="px-4 py-3 text-sm">
-        <DeclineForm refundRequestId={r.id} />
-      </td>
+      <DecisionCell refundRequestId={r.id} />
     </tr>
   );
 }
