@@ -36,6 +36,20 @@ _Avoid_: Completed, Paid out
 **Failed Refund**:
 A Refund where the money couldn't be sent. The Refund Request stays approved, because the decision hasn't changed.
 
+### Team Licences
+
+**Team Licence**:
+A purchase of a course made for a team, giving it a number of Seats to hand out.
+_Avoid_: Bulk purchase, Group licence
+
+**Seat**:
+One place on a Team Licence, handed out as a code that a team member claims to get the course.
+_Avoid_: Coupon, Voucher
+
+**Revoked Seat**:
+An unclaimed Seat that can no longer be claimed because its Team Licence was refunded.
+_Avoid_: Voided, Cancelled, Expired
+
 ### People
 
 **Platform Admin**:
@@ -43,5 +57,5 @@ A member of the Cadence team who runs the platform. Only a Platform Admin decide
 _Avoid_: Admin (on its own), Staff
 
 **Team Admin**:
-A member of a customer's team who manages that team's seats.
+A member of a customer's team who manages that team's Seats.
 _Avoid_: Admin (on its own), Owner
