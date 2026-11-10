@@ -290,6 +290,8 @@ export const coupons = sqliteTable("coupons", {
     .references(() => purchases.id),
   redeemedByUserId: integer("redeemed_by_user_id").references(() => users.id),
   redeemedAt: text("redeemed_at"),
+  /** Set when a Refund Request on the licence is approved: a Revoked Seat can never be claimed. */
+  revokedAt: text("revoked_at"),
   createdAt: text("created_at")
     .notNull()
     .$defaultFn(() => new Date().toISOString()),

@@ -16,6 +16,7 @@ import {
   approveRefundRequest,
   declineRefundRequest,
   getRefundEligibility,
+  hasOpenRefundRequest,
   listOpenRefundRequests,
   openRefundRequest,
 } from "./refunds.server";
@@ -764,5 +765,123 @@ describe("approveRefundRequest", () => {
 
   it("refuses a Refund Request that does not exist", () => {
     expect(approve(9999)).toEqual({ ok: false, refusedBecause: "not-found" });
+  });
+
+  describe("Team Licence Seats", () => {
+    function seatsOn(purchaseId: number) {
+      return testDb
+        .select({
+          code: schema.coupons.code,
+          redeemedAt: schema.coupons.redeemedAt,
+          revokedAt: schema.coupons.revokedAt,
+        })
+        .from(schema.coupons)
+        .where(eq(schema.coupons.purchaseId, purchaseId))
+        .orderBy(schema.coupons.id)
+        .all();
+    }
+
+    it("revokes every unclaimed Seat on the Team Licence", () => {
+      const request = buyEnrolAndAsk();
+      issueSeat(request.purchaseId, false);
+      issueSeat(request.purchaseId, false);
+
+      approve(request.id);
+
+      expect(seatsOn(request.purchaseId)).toEqual([
+        expect.objectContaining({ revokedAt: DECIDED_AT.toISOString() }),
+        expect.objectContaining({ revokedAt: DECIDED_AT.toISOString() }),
+      ]);
+    });
+
+    it("leaves a claimed Seat as it was", () => {
+      const request = buyEnrolAndAsk();
+      // Claimed before the Refund Request: eligibility would refuse one
+      // raised afterwards, but the Seat must survive approval regardless.
+      issueSeat(request.purchaseId, true);
+
+      approve(request.id);
+
+      expect(seatsOn(request.purchaseId)).toEqual([
+        expect.objectContaining({ redeemedAt: PURCHASED_AT, revokedAt: null }),
+      ]);
+    });
+
+    it("leaves Seats on other Team Licences alone", () => {
+      const other = buyCourse(7900, "2026-02-01T10:00:00.000Z");
+      issueSeat(other.id, false);
+      const request = buyEnrolAndAsk();
+
+      approve(request.id);
+
+      expect(seatsOn(other.id)).toEqual([
+        expect.objectContaining({ revokedAt: null }),
+      ]);
+    });
+
+    it("revokes nothing when the Refund Request is refused", () => {
+      const request = buyEnrolAndAsk();
+      issueSeat(request.purchaseId, false);
+      approve(request.id);
+      issueSeat(request.purchaseId, false);
+
+      expect(approve(request.id)).toMatchObject({ ok: false });
+      expect(seatsOn(request.purchaseId)[1]).toMatchObject({ revokedAt: null });
+    });
+  });
+});
+
+describe("hasOpenRefundRequest", () => {
+  let platformAdmin: typeof schema.users.$inferSelect;
+
+  beforeEach(() => {
+    testDb = createTestDb();
+    base = seedBaseData(testDb);
+    platformAdmin = testDb
+      .insert(schema.users)
+      .values({
+        name: "Platform Admin",
+        email: "admin@example.com",
+        role: schema.UserRole.Admin,
+      })
+      .returning()
+      .get();
+  });
+
+  function ask() {
+    const result = openRefundRequest({
+      userId: base.user.id,
+      courseId: base.course.id,
+      reason: "The team no longer needs it.",
+      now: SOON_AFTER,
+    });
+    if (!result.ok) throw new Error(`could not open: ${result.blockedBy}`);
+    return result.refundRequest;
+  }
+
+  it("is false for a Team Licence nobody has asked to refund", () => {
+    const purchase = buyCourse();
+    issueSeat(purchase.id, false);
+    expect(hasOpenRefundRequest(purchase.id)).toBe(false);
+  });
+
+  it("is true while the Team Licence has an Open Refund Request", () => {
+    const purchase = buyCourse();
+    issueSeat(purchase.id, false);
+    ask();
+    expect(hasOpenRefundRequest(purchase.id)).toBe(true);
+  });
+
+  it("is false again once the Refund Request is declined, so Seats can be claimed", () => {
+    const purchase = buyCourse();
+    issueSeat(purchase.id, false);
+    const request = ask();
+    declineRefundRequest({
+      refundRequestId: request.id,
+      platformAdminId: platformAdmin.id,
+      reason: "Seats are not refundable after the team has started.",
+      now: at("2026-03-05T12:00:00.000Z"),
+    });
+    expect(hasOpenRefundRequest(purchase.id)).toBe(false);
   });
 });

@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
   coupons,
@@ -75,6 +75,14 @@ function findOpenRefundRequest(purchaseId: number) {
       )
     )
     .get();
+}
+
+/**
+ * Whether a purchase has an Open Refund Request. While a Team Licence has
+ * one, none of its Seats can be claimed.
+ */
+export function hasOpenRefundRequest(purchaseId: number): boolean {
+  return findOpenRefundRequest(purchaseId) !== undefined;
 }
 
 function hasClaimedSeat(purchaseId: number): boolean {
@@ -396,6 +404,19 @@ export function approveRefundRequest(input: {
         and(
           eq(enrollments.userId, purchase.userId),
           eq(enrollments.courseId, purchase.courseId)
+        )
+      )
+      .run();
+
+    // A refunded Team Licence cannot hand out Seats: every unclaimed Seat
+    // becomes a Revoked Seat. Claimed Seats belong to the team and stay.
+    tx.update(coupons)
+      .set({ revokedAt: now.toISOString() })
+      .where(
+        and(
+          eq(coupons.purchaseId, purchase.id),
+          isNull(coupons.redeemedAt),
+          isNull(coupons.revokedAt)
         )
       )
       .run();
