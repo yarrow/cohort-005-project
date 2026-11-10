@@ -11,6 +11,7 @@ import {
   purchases,
   videoWatchEvents,
 } from "~/db/schema";
+import { courses, users } from "~/db/schema";
 
 export const REFUND_WINDOW_DAYS = 14;
 /** Completing this share of a course's lessons or more blocks a Refund Request. */
@@ -217,4 +218,76 @@ export function openRefundRequest(input: {
     .get();
 
   return { ok: true, refundRequest, amount: eligibility.offer.amount };
+}
+
+export type OpenRefundRequestListing = {
+  id: number;
+  learner: { id: number; name: string; email: string };
+  course: { id: number; title: string };
+  amountPaid: number;
+  reason: string;
+  requestedAt: string;
+  /** Lessons with completed progress, out of `totalLessons` in the course. */
+  lessonsCompleted: number;
+  totalLessons: number;
+  /** Furthest point reached in each lesson's video, summed across the course. */
+  secondsWatched: number;
+  purchasedAt: string;
+  /** UTC calendar days from purchase to request, as the Refund Window counts. */
+  daysSincePurchase: number;
+};
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function calendarDaysBetween(fromIso: string, toIso: string): number {
+  const from = Date.parse(calendarDay(new Date(fromIso)));
+  const to = Date.parse(calendarDay(new Date(toIso)));
+  return Math.round((to - from) / MS_PER_DAY);
+}
+
+/** Every Open Refund Request across all courses, oldest first. */
+export function listOpenRefundRequests(): OpenRefundRequestListing[] {
+  return db
+    .select({
+      id: refunds.id,
+      learnerId: users.id,
+      learnerName: users.name,
+      learnerEmail: users.email,
+      courseId: courses.id,
+      courseTitle: courses.title,
+      amountPaid: purchases.amountPaid,
+      purchasedAt: purchases.createdAt,
+      reason: refunds.reason,
+      requestedAt: refunds.requestedAt,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(refunds.status, RefundStatus.Open))
+    .orderBy(refunds.requestedAt, refunds.id)
+    .all()
+    .map((row) => {
+      const lessonIds = getCourseLessonIds(row.courseId);
+      return {
+        id: row.id,
+        learner: {
+          id: row.learnerId,
+          name: row.learnerName,
+          email: row.learnerEmail,
+        },
+        course: { id: row.courseId, title: row.courseTitle },
+        amountPaid: row.amountPaid,
+        reason: row.reason,
+        requestedAt: row.requestedAt,
+        lessonsCompleted: countCompletedLessons(row.learnerId, lessonIds),
+        totalLessons: lessonIds.length,
+        secondsWatched: countSecondsWatched(row.learnerId, lessonIds),
+        purchasedAt: row.purchasedAt,
+        daysSincePurchase: calendarDaysBetween(
+          row.purchasedAt,
+          row.requestedAt
+        ),
+      };
+    });
 }
