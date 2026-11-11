@@ -2800,8 +2800,9 @@ This course is still in draft while the cluster examples are rewritten against t
 
   // ─── Refund Requests on Team Licences ───
   // Marta's licence has an Open Refund Request, so none of its Seats can be
-  // claimed until it is decided. James's licence was refunded: its unclaimed
-  // Seats are Revoked Seats, its one claimed Seat stays with Sophia.
+  // claimed until it is decided. James's licence was refunded: nobody had
+  // claimed a Seat (a claimed Seat blocks a Refund Request), so all three of
+  // its Seats are Revoked Seats.
   db.insert(schema.refunds)
     .values({
       purchaseId: novakLicence.purchase.id,
@@ -2817,7 +2818,7 @@ This course is still in draft while the cluster examples are rewritten against t
     3,
     "TEAM-DS-PARK",
     10,
-    ["sophia.davis@student.dev"]
+    []
   );
   db.insert(schema.refunds)
     .values({

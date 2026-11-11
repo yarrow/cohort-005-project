@@ -11,7 +11,6 @@ import {
   users,
   modules,
   lessons,
-  enrollments,
   lessonProgress,
   courseRatings,
   LessonProgressStatus,
@@ -19,6 +18,7 @@ import {
 import { eq, and, or, sql } from "drizzle-orm";
 import { getRefundEligibility } from "~/lib/refunds.server";
 import { getAccess } from "~/lib/access.server";
+import { getCourseLessonIds } from "~/lib/course-lessons.server";
 import { RefundPausedNotice } from "~/components/refund-paused-notice";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
@@ -47,10 +47,7 @@ import { data, isRouteErrorResponse } from "react-router";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
 import { resolveCountry } from "~/lib/country.server";
-import {
-  calculatePppPrice,
-  getCountryTierInfo,
-} from "~/lib/ppp";
+import { calculatePppPrice, getCountryTierInfo } from "~/lib/ppp";
 import { parseFormData } from "~/lib/validation";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
 import { StarRating, StarRatingInput } from "~/components/star-rating";
@@ -132,35 +129,6 @@ function getLessonCountForCourse(courseId: number) {
     .get();
 
   return count?.count ?? 0;
-}
-
-function isUserEnrolled(userId: number, courseId: number) {
-  const enrollment = db
-    .select()
-    .from(enrollments)
-    .where(
-      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
-    )
-    .get();
-  return !!enrollment;
-}
-
-function getCourseLessonIds(courseId: number): number[] {
-  const courseModules = db
-    .select({ id: modules.id })
-    .from(modules)
-    .where(eq(modules.courseId, courseId))
-    .all();
-
-  if (courseModules.length === 0) return [];
-
-  const courseLessons = db
-    .select({ id: lessons.id })
-    .from(lessons)
-    .where(or(...courseModules.map((m) => eq(lessons.moduleId, m.id)))!)
-    .all();
-
-  return courseLessons.map((l) => l.id);
 }
 
 function calculateProgress(
@@ -304,7 +272,10 @@ function findRating(userId: number, courseId: number) {
     .select()
     .from(courseRatings)
     .where(
-      and(eq(courseRatings.userId, userId), eq(courseRatings.courseId, courseId))
+      and(
+        eq(courseRatings.userId, userId),
+        eq(courseRatings.courseId, courseId)
+      )
     )
     .get();
 }
@@ -390,25 +361,21 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   }
 
   const lessonCount = getLessonCountForCourse(course.id);
-  const currentUserId = await getCurrentUserId(request);
+  // Enrollment and paused access both come from the access check. Access is
+  // paused while an Open Refund Request is under review (ADR 0001).
+  const {
+    userId: currentUserId,
+    enrolled,
+    openRefundRequest,
+  } = await getAccess(request, course.id);
 
-  let enrolled = false;
   let progress = 0;
   let lessonProgressMap: Record<number, string> = {};
   let nextLessonId: number | null = null;
   let refundOffer: { amount: number; lastDayInWindow: string } | null = null;
-  let refundRequestedAt: string | null = null;
 
   if (currentUserId) {
-    enrolled = isUserEnrolled(currentUserId, course.id);
-
-    // Access is paused while an Open Refund Request is under review.
-    if (enrolled) {
-      const access = await getAccess(request, course.id);
-      refundRequestedAt = access.openRefundRequest?.requestedAt ?? null;
-    }
-
-    if (enrolled && !refundRequestedAt) {
+    if (enrolled && !openRefundRequest) {
       const eligibility = getRefundEligibility(currentUserId, course.id);
       if (eligibility.eligible) {
         refundOffer = {
@@ -460,7 +427,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     ratingSummary,
     userRating,
     refundOffer,
-    refundRequestedAt,
+    openRefundRequest,
   };
 }
 
@@ -478,7 +445,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("Course not found", { status: 404 });
   }
 
-  if (!isUserEnrolled(currentUserId, course.id)) {
+  if (!(await getAccess(request, course.id)).enrolled) {
     throw data("You must be enrolled in this course to rate it.", {
       status: 403,
     });
@@ -562,7 +529,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     ratingSummary,
     userRating,
     refundOffer,
-    refundRequestedAt,
+    openRefundRequest,
   } = loaderData;
   const isInstructor = currentUserId === course.instructorId;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -736,7 +703,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
           <div className="mt-8">
             <CourseContent
               course={course}
-              enrolled={enrolled && !refundRequestedAt}
+              enrolled={enrolled && !openRefundRequest}
               isInstructor={isInstructor}
               lessonProgressMap={lessonProgressMap}
             />
@@ -750,7 +717,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
               <h2 className="text-lg font-semibold">
                 {isInstructor
                   ? "Your Course"
-                  : refundRequestedAt
+                  : openRefundRequest
                     ? "Access Paused"
                     : enrolled
                       ? "Your Progress"
@@ -765,8 +732,10 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                     Manage Course
                   </Button>
                 </Link>
-              ) : refundRequestedAt ? (
-                <RefundPausedNotice requestedAt={refundRequestedAt} />
+              ) : openRefundRequest ? (
+                <RefundPausedNotice
+                  requestedAt={openRefundRequest.requestedAt}
+                />
               ) : enrolled ? (
                 <>
                   <div className="mb-2 flex items-center justify-between text-sm">

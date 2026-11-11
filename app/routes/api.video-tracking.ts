@@ -2,6 +2,7 @@ import { data } from "react-router";
 import { z } from "zod";
 import type { Route } from "./+types/api.video-tracking";
 import { getCurrentUserId } from "~/lib/session";
+import { requireLessonContentAccess } from "~/lib/access.server";
 import { parseJsonBody } from "~/lib/validation";
 import { db } from "~/db";
 import { videoWatchEvents } from "~/db/schema";
@@ -26,8 +27,10 @@ export async function action({ request }: Route.ActionArgs) {
 
   const { lessonId, eventType, positionSeconds } = parsed.data;
 
-  db
-    .insert(videoWatchEvents)
+  // Watch time is progress: only someone who may view the lesson records it.
+  await requireLessonContentAccess(request, lessonId);
+
+  db.insert(videoWatchEvents)
     .values({
       userId: currentUserId,
       lessonId,

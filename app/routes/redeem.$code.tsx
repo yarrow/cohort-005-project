@@ -42,10 +42,29 @@ function isUserEnrolled(userId: number, courseId: number) {
   return !!existing;
 }
 
-const REVOKED_SEAT_MESSAGE =
-  "This seat has been revoked because the team licence was refunded, so it can no longer be claimed.";
-const UNDER_REVIEW_MESSAGE =
-  "This team licence is under review while a refund request is open. Please try again later: if the request is declined, the seat can be claimed again.";
+type SeatBlock = "claimed" | "revoked" | "under-review";
+
+const seatBlockMessages: Record<SeatBlock, string> = {
+  claimed: "Coupon has already been redeemed",
+  revoked:
+    "This seat has been revoked because the team licence was refunded, so it can no longer be claimed.",
+  "under-review":
+    "This team licence is under review while a refund request is open. Please try again later: if the request is declined, the seat can be claimed again.",
+};
+
+/**
+ * Why a Seat cannot be claimed by anyone right now, or null if it can. A
+ * Revoked Seat never can; a Seat on a Team Licence with an Open Refund
+ * Request can't until that request is declined.
+ */
+function whySeatCannotBeClaimed(
+  coupon: typeof coupons.$inferSelect
+): SeatBlock | null {
+  if (coupon.redeemedByUserId !== null) return "claimed";
+  if (coupon.revokedAt !== null) return "revoked";
+  if (hasOpenRefundRequest(coupon.purchaseId)) return "under-review";
+  return null;
+}
 
 type RedeemResult =
   | { ok: true; enrollment: typeof enrollments.$inferSelect }
@@ -61,16 +80,9 @@ function redeemCoupon(
     return { ok: false, error: "Coupon not found" };
   }
 
-  if (coupon.redeemedByUserId !== null) {
-    return { ok: false, error: "Coupon has already been redeemed" };
-  }
-
-  if (coupon.revokedAt !== null) {
-    return { ok: false, error: REVOKED_SEAT_MESSAGE };
-  }
-
-  if (hasOpenRefundRequest(coupon.purchaseId)) {
-    return { ok: false, error: UNDER_REVIEW_MESSAGE };
+  const blockedBy = whySeatCannotBeClaimed(coupon);
+  if (blockedBy) {
+    return { ok: false, error: seatBlockMessages[blockedBy] };
   }
 
   const existingEnrollment = db
@@ -155,15 +167,15 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     throw data("Course not found.", { status: 404 });
   }
 
-  const alreadyRedeemed = coupon.redeemedByUserId !== null;
+  const blockedBy = whySeatCannotBeClaimed(coupon);
+  const alreadyRedeemed = blockedBy === "claimed";
+  const revoked = blockedBy === "revoked";
+  const underReview = blockedBy === "under-review";
   const alreadyEnrolled = isUserEnrolled(currentUserId, coupon.courseId);
-  const revoked = !alreadyRedeemed && coupon.revokedAt !== null;
-  const underReview =
-    !alreadyRedeemed && !revoked && hasOpenRefundRequest(coupon.purchaseId);
 
   // Check country mismatch upfront so we can show a clear message
   let countryMismatch = false;
-  if (!alreadyRedeemed && !alreadyEnrolled && !revoked && !underReview) {
+  if (!blockedBy && !alreadyEnrolled) {
     const userCountry = await resolveCountry(request);
     const purchase = db
       .select()
@@ -281,7 +293,7 @@ export default function Redeem({
                 <span className="font-medium">This seat has been revoked</span>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                {REVOKED_SEAT_MESSAGE}
+                {seatBlockMessages.revoked}
               </p>
             </div>
           ) : alreadyEnrolled ? (
@@ -309,7 +321,7 @@ export default function Redeem({
                 <span className="font-medium">Licence under review</span>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                {UNDER_REVIEW_MESSAGE}
+                {seatBlockMessages["under-review"]}
               </p>
             </div>
           ) : countryMismatch ? (

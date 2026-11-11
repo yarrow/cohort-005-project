@@ -3,7 +3,11 @@ import { Link, useFetcher, useNavigate } from "react-router";
 import { toast } from "sonner";
 import type { Route } from "./+types/courses.$slug.lessons.$lessonId";
 import { getCurrentUserId } from "~/lib/session";
-import { getAccess, requireContentAccess } from "~/lib/access.server";
+import {
+  getAccess,
+  requireContentAccess,
+  requireLessonContentAccess,
+} from "~/lib/access.server";
 import { renderComment } from "~/lib/comment-markdown.server";
 import {
   CommentThread,
@@ -725,16 +729,24 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   const access = await getAccess(request, course.id);
   const currentUserId = access.userId;
   const enrolled = access.enrolled;
-  // Access is paused while an Open Refund Request is under review, and the
-  // learner's progress stays exactly where it was when they asked.
-  const refundRequestedAt = access.openRefundRequest?.requestedAt ?? null;
+  // Everything about the lesson beyond its title is course content. Someone
+  // without content access (signed out, not enrolled, PPP-blocked, or paused
+  // by an Open Refund Request, ADR 0001) is sent none of it, and their
+  // progress stays exactly where it was.
+  const {
+    pppBlocked,
+    pppBlockedCountry,
+    pppPurchaseCountry,
+    canViewContent,
+    openRefundRequest,
+  } = access;
   let lessonStatus: string | null = null;
   let lastWatchPosition = 0;
   let watchProgress = 0;
   let lessonProgressMap: Record<number, string> = {};
 
   if (currentUserId) {
-    if (enrolled && !refundRequestedAt) {
+    if (enrolled && canViewContent) {
       // Mark lesson as in-progress when viewed
       markLessonInProgress(currentUserId, lessonId);
       const progress = getLessonProgress(currentUserId, lessonId);
@@ -764,11 +776,6 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     }
   }
 
-  // PPP Access Guard — resolved by getAccess, which treats a blocked user as
-  // having no access to the course's content at all.
-  const { pppBlocked, pppBlockedCountry, pppPurchaseCountry, canViewContent } =
-    access;
-
   // Comments are confidential to the course: only people who can read the
   // lesson can read the discussion on it.
   const instructor = getUserById(course.instructorId);
@@ -778,7 +785,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 
   // Render lesson content from Markdown to HTML server-side
   const contentHtml =
-    lesson.content && !refundRequestedAt
+    canViewContent && lesson.content
       ? await renderMarkdown(lesson.content)
       : null;
 
@@ -790,7 +797,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     currentIndex < allLessons.length - 1 ? allLessons[currentIndex + 1] : null;
 
   // Check for quiz attached to this lesson
-  const quizRecord = getQuizByLessonId(lessonId);
+  const quizRecord = canViewContent ? getQuizByLessonId(lessonId) : undefined;
   let quiz: {
     id: number;
     title: string;
@@ -852,7 +859,13 @@ export async function loader({ params, request }: Route.LoaderArgs) {
       id: mod.id,
       title: mod.title,
     },
-    lesson,
+    lesson: {
+      id: lesson.id,
+      title: lesson.title,
+      durationMinutes: lesson.durationMinutes,
+      videoUrl: canViewContent ? lesson.videoUrl : null,
+      githubRepoUrl: canViewContent ? lesson.githubRepoUrl : null,
+    },
     contentHtml,
     lessonStatus,
     enrolled,
@@ -869,7 +882,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     pppPurchaseCountry,
     comments,
     canViewContent,
-    refundRequestedAt,
+    openRefundRequest,
     canModerate: access.isStaff,
     instructorName: instructor?.name ?? "your instructor",
   };
@@ -948,6 +961,12 @@ export async function action({ params, request }: Route.ActionArgs) {
       }
       throw error;
     }
+  }
+
+  // Progress intents too: a learner without content access (for example while
+  // their Refund Request is open, ADR 0001) must not move their progress.
+  if (intent === "mark-complete" || intent === "submit-quiz") {
+    await requireLessonContentAccess(request, lessonId);
   }
 
   if (intent === "mark-complete") {
@@ -1034,7 +1053,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
     pppPurchaseCountry,
     comments,
     canViewContent,
-    refundRequestedAt,
+    openRefundRequest,
     canModerate,
     instructorName,
   } = loaderData;
@@ -1062,12 +1081,12 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
   const quizResult = quizFetcher.data?.quizResult ?? null;
   const isSubmittingQuiz = quizFetcher.state !== "idle";
 
-  if (refundRequestedAt) {
+  if (openRefundRequest) {
     return (
       <div className="flex min-h-[60vh] items-center justify-center p-6">
         <div className="max-w-md space-y-6 text-center">
           <h1 className="text-2xl font-bold">Access Paused</h1>
-          <RefundPausedNotice requestedAt={refundRequestedAt} />
+          <RefundPausedNotice requestedAt={openRefundRequest.requestedAt} />
           <Link to={`/courses/${course.slug}`}>
             <Button variant="outline">Back to Course</Button>
           </Link>
@@ -1182,7 +1201,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
               startPosition={lastWatchPosition}
               durationMinutes={lesson.durationMinutes}
               watchProgress={watchProgress}
-              trackingEnabled={enrolled && !!currentUserId}
+              trackingEnabled={enrolled && canViewContent}
               autoplay={autoplay}
               onToggleAutoplay={toggleAutoplay}
             />
@@ -1196,7 +1215,20 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
             />
           )}
 
-          {!contentHtml && !lesson.videoUrl && (
+          {!canViewContent && (
+            <Card className="mb-8">
+              <CardContent className="py-12 text-center text-muted-foreground">
+                <p className="mb-4">
+                  Enroll in this course to view this lesson.
+                </p>
+                <Link to={`/courses/${course.slug}`}>
+                  <Button variant="outline">Back to Course</Button>
+                </Link>
+              </CardContent>
+            </Card>
+          )}
+
+          {canViewContent && !contentHtml && !lesson.videoUrl && (
             <Card className="mb-8">
               <CardContent className="py-12 text-center text-muted-foreground">
                 No content has been added to this lesson yet.
@@ -1205,7 +1237,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
           )}
 
           {/* Quiz Section */}
-          {quiz && enrolled && currentUserId && (
+          {quiz && enrolled && canViewContent && (
             <QuizSection
               quiz={quiz}
               bestAttempt={bestAttempt}
@@ -1216,7 +1248,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
           )}
 
           {/* Mark Complete / Up Next */}
-          {enrolled && currentUserId && (
+          {enrolled && canViewContent && (
             <div className="mb-8">
               {isCompleted ? (
                 <div className="flex items-center gap-3">

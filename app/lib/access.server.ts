@@ -6,6 +6,8 @@ import {
   users,
   courses,
   enrollments,
+  lessons,
+  modules,
   purchases,
 } from "~/db/schema";
 import { getCurrentUserId } from "~/lib/session";
@@ -178,6 +180,31 @@ export async function requireContentAccess(
   }
 
   return access;
+}
+
+function getCourseIdForLesson(lessonId: number) {
+  return db
+    .select({ courseId: modules.courseId })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .where(eq(lessons.id, lessonId))
+    .get()?.courseId;
+}
+
+/**
+ * requireContentAccess for the course a lesson belongs to — for actions that
+ * only know the lesson, such as recording progress. Throws 404 for an unknown
+ * lesson.
+ */
+export async function requireLessonContentAccess(
+  request: Request,
+  lessonId: number
+): Promise<Access> {
+  const courseId = getCourseIdForLesson(lessonId);
+  if (courseId === undefined) {
+    throw data("Lesson not found", { status: 404 });
+  }
+  return requireContentAccess(request, courseId);
 }
 
 /**
