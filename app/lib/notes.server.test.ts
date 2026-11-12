@@ -107,12 +107,22 @@ describe("saving a Note", () => {
     expect(getNote(db, base.user.id, lessonIds[0])).toBeUndefined();
   });
 
-  it("removes the Note when saved empty", () => {
+  it("refuses an empty Note and keeps the existing one", () => {
     saveNote(db, base.user.id, lessonIds[0], "Rewatch this.", NOW);
 
-    expect(saveNote(db, base.user.id, lessonIds[0], "   ", NOW)).toEqual({
-      ok: true,
-      note: null,
+    expect(
+      saveNote(db, base.user.id, lessonIds[0], "   ", minutesAfterNow(5))
+    ).toEqual({ ok: false, error: "Write something before saving." });
+    expect(getNote(db, base.user.id, lessonIds[0])).toMatchObject({
+      body: "Rewatch this.",
+      updatedAt: NOW.toISOString(),
+    });
+  });
+
+  it("refuses an empty Note when there is none yet", () => {
+    expect(saveNote(db, base.user.id, lessonIds[0], "", NOW)).toEqual({
+      ok: false,
+      error: "Write something before saving.",
     });
     expect(getNote(db, base.user.id, lessonIds[0])).toBeUndefined();
   });

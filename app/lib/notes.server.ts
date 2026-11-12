@@ -2,7 +2,7 @@ import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { and, desc, eq } from "drizzle-orm";
 import * as schema from "~/db/schema";
 import { courses, lessons, modules, notes } from "~/db/schema";
-import { NOTE_TOO_LONG_MESSAGE, noteBodySchema } from "~/lib/notes";
+import { noteBodySchema } from "~/lib/notes";
 
 // ─── Notes ───
 // A Note is a Student's own plain-text writing about a Lesson, one per Student
@@ -19,7 +19,7 @@ export type Db = BetterSQLite3Database<typeof schema>;
 type Note = typeof notes.$inferSelect;
 
 export type SaveNoteResult =
-  | { ok: true; note: Note | null }
+  | { ok: true; note: Note }
   | { ok: false; error: string };
 
 export function getNote(db: Db, userId: number, lessonId: number) {
@@ -32,10 +32,10 @@ export function getNote(db: Db, userId: number, lessonId: number) {
 
 /**
  * Saves the Student's Note on the Lesson: creates it, or replaces its body and
- * moves its "last edited" time on. The body is trimmed; over
- * `MAX_NOTE_LENGTH` characters it is refused, not truncated. A body that is
- * empty after trimming
- * removes the Note, and the result's `note` is then null.
+ * moves its "last edited" time on. The body is trimmed. It is refused, never
+ * truncated, when over `MAX_NOTE_LENGTH` characters, and refused when empty,
+ * so a cleared box never deletes a Note. A refusal leaves any existing Note
+ * as it was.
  */
 export function saveNote(
   db: Db,
@@ -46,16 +46,9 @@ export function saveNote(
 ): SaveNoteResult {
   const parsed = noteBodySchema.safeParse(body);
   if (!parsed.success) {
-    return { ok: false, error: NOTE_TOO_LONG_MESSAGE };
+    return { ok: false, error: parsed.error.issues[0].message };
   }
   const trimmed = parsed.data;
-
-  if (trimmed.length === 0) {
-    db.delete(notes)
-      .where(and(eq(notes.userId, userId), eq(notes.lessonId, lessonId)))
-      .run();
-    return { ok: true, note: null };
-  }
 
   const at = now.toISOString();
   const note = db
