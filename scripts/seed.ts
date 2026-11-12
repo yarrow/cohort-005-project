@@ -2070,6 +2070,50 @@ This course is still in draft while the cluster examples are rewritten against t
 
   console.log(`Created ${countRows(schema.lessonProgress)} lesson progress records.`);
 
+  // ─── Bookmarks and Notes ───
+  // Each private to the Student who made it, on Lessons in a Course they are
+  // enrolled in.
+
+  db.insert(schema.bookmarks)
+    .values([
+      { userId: students[0].id, lessonId: course1LessonIds[4], createdAt: daysAgo(44) },
+      { userId: students[0].id, lessonId: course2LessonIds[6], createdAt: daysAgo(33) },
+      { userId: students[0].id, lessonId: course1LessonIds[16], createdAt: daysAgo(34) },
+      { userId: students[2].id, lessonId: course1LessonIds[2], createdAt: daysAgo(28) },
+      { userId: students[4].id, lessonId: course1LessonIds[0], createdAt: daysAgo(12) },
+    ])
+    .run();
+
+  db.insert(schema.notes)
+    .values([
+      {
+        userId: students[0].id,
+        lessonId: course1LessonIds[4],
+        body: "Come back to this before the project.\n\n# not a heading — notes are plain text, *as typed*.",
+        createdAt: daysAgo(44),
+        updatedAt: daysAgo(20),
+      },
+      {
+        userId: students[0].id,
+        lessonId: course2LessonIds[2],
+        body: "Rewatch the part about status codes.",
+        createdAt: daysAgo(37),
+        updatedAt: daysAgo(37),
+      },
+      {
+        userId: students[2].id,
+        lessonId: course1LessonIds[1],
+        body: "Try the exercise again without looking at the solution.",
+        createdAt: daysAgo(29),
+        updatedAt: daysAgo(27),
+      },
+    ])
+    .run();
+
+  console.log(
+    `Created ${countRows(schema.bookmarks)} bookmarks and ${countRows(schema.notes)} notes.`
+  );
+
   // ─── Quiz Attempts ───
 
   // Helper to record a quiz attempt with answers
@@ -2849,6 +2893,9 @@ This course is still in draft while the cluster examples are rewritten against t
   console.log(`  Enrollments: ${countRows(schema.enrollments)}`);
   console.log(`  Course ratings: ${countRows(schema.courseRatings)}`);
   console.log(`  Lesson comments: ${countRows(schema.comments)}`);
+  console.log(
+    `  Bookmarks: ${countRows(schema.bookmarks)}, notes: ${countRows(schema.notes)}`
+  );
   console.log(
     `  Lesson progress: ${countRows(schema.lessonProgress)} (${countRows(schema.lessonProgress, eq(schema.lessonProgress.status, LessonProgressStatus.Completed))} completed)`
   );
