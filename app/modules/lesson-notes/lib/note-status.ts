@@ -6,9 +6,11 @@ export type NoteStatus =
   | { kind: "unsaved" }
   | { kind: "saved"; updatedAt: string };
 
+export type SavedNote = { body: string; updatedAt: string };
+
 export type NoteDraft = {
   draft: string;
-  saved: { body: string; updatedAt: string } | null;
+  saved: SavedNote | null;
   isSaving: boolean;
   error: string | undefined;
   maxLength: number;
@@ -21,11 +23,13 @@ export function noteStatus({
   error,
   maxLength,
 }: NoteDraft): NoteStatus {
+  // The server trims before it checks the limit and stores the body.
+  const body = draft.trim();
   if (isSaving) return { kind: "saving" };
-  if (draft.length > maxLength) {
-    return { kind: "too-long", over: draft.length - maxLength };
+  if (body.length > maxLength) {
+    return { kind: "too-long", over: body.length - maxLength };
   }
-  if (draft !== (saved?.body ?? "")) {
+  if (body !== (saved?.body ?? "")) {
     return error ? { kind: "error", message: error } : { kind: "unsaved" };
   }
   if (saved) return { kind: "saved", updatedAt: saved.updatedAt };

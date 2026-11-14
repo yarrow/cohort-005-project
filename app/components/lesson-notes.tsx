@@ -7,13 +7,13 @@ import { Textarea } from "~/components/ui/textarea";
 import { SectionHeading } from "~/components/section-heading";
 import { MAX_NOTE_LENGTH } from "~/lib/notes";
 import { cn, formatRelativeTime } from "~/lib/utils";
-import { describeNoteDraft, type NoteStatus } from "~/modules/lesson-notes";
+import {
+  describeNoteDraft,
+  type NoteStatus,
+  type SavedNote,
+} from "~/modules/lesson-notes";
 
-export function LessonNotes({
-  note,
-}: {
-  note: { body: string; updatedAt: string } | null;
-}) {
+export function LessonNotes({ note }: { note: SavedNote | null }) {
   const fetcher = useFetcher<{ ok: boolean; error?: string }>();
   const [draft, setDraft] = useState(note?.body ?? "");
   const { status, canSave } = describeNoteDraft({
@@ -45,7 +45,11 @@ export function LessonNotes({
             className="min-h-28 resize-y"
           />
 
-          <NoteFooter status={status} canSave={canSave} length={draft.length} />
+          <NoteFooter
+            status={status}
+            canSave={canSave}
+            length={draft.trim().length}
+          />
         </fetcher.Form>
       </CardContent>
     </Card>

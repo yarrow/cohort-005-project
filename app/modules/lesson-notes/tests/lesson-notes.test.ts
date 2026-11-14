@@ -87,4 +87,21 @@ describe("describeNoteDraft", () => {
       ).status
     ).toEqual({ kind: "saved", updatedAt: saved.updatedAt });
   });
+
+  it("treats a draft as saved when it differs from the note only by surrounding whitespace, as the server trims it", () => {
+    expect(
+      describeNoteDraft(
+        draft({ draft: `  ${saved.body}\n`, saved, maxLength: 100 })
+      )
+    ).toEqual({
+      status: { kind: "saved", updatedAt: saved.updatedAt },
+      canSave: false,
+    });
+  });
+
+  it("does not count surrounding whitespace against the limit", () => {
+    expect(
+      describeNoteDraft(draft({ draft: `${"x".repeat(20)}\n\n` })).status
+    ).toEqual({ kind: "unsaved" });
+  });
 });

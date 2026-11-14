@@ -1,6 +1,6 @@
 import { canSaveNote, noteStatus, type NoteDraft } from "./lib/note-status";
 
-export type { NoteStatus, NoteDraft } from "./lib/note-status";
+export type { NoteStatus, NoteDraft, SavedNote } from "./lib/note-status";
 
 /**
  * What the Student's note editor should say about their draft, and whether
