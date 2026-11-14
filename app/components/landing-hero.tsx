@@ -3,6 +3,7 @@ import { ArrowRight, Sparkles } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { CourseImage } from "~/components/course-image";
 import { CourseByline } from "~/components/course-byline";
+import { cn } from "~/lib/utils";
 import type { LandingCourse } from "~/modules/landing/index.server";
 
 export function LandingHero({
@@ -22,7 +23,12 @@ export function LandingHero({
         aria-hidden
         className="pointer-events-none absolute inset-0 bg-linear-to-br from-muted/70 via-background to-background"
       />
-      <div className="relative mx-auto grid max-w-6xl items-center gap-12 px-6 py-16 sm:py-20 lg:grid-cols-[1.15fr_1fr] lg:py-28">
+      <div
+        className={cn(
+          "relative mx-auto grid max-w-6xl items-center gap-12 px-6 py-16 sm:py-20 lg:py-28",
+          spotlight && "lg:grid-cols-[1.15fr_1fr]"
+        )}
+      >
         <HeroCopy
           totalCourses={totalCourses}
           totalLessons={totalLessons}
@@ -45,11 +51,13 @@ function HeroCopy({
 }) {
   return (
     <div>
-      <p className="inline-flex items-center gap-2 rounded-full border border-border bg-background px-3 py-1 text-xs font-medium text-muted-foreground">
-        <Sparkles className="size-3.5 text-primary" />
-        {totalCourses} courses · {totalLessons} lessons
-      </p>
-      <h1 className="mt-6 text-5xl font-bold tracking-tight sm:text-6xl lg:text-7xl">
+      {totalCourses > 0 && (
+        <p className="mb-6 inline-flex items-center gap-2 rounded-full border border-border bg-background px-3 py-1 text-xs font-medium text-muted-foreground">
+          <Sparkles className="size-3.5 text-primary" />
+          {totalCourses} courses · {totalLessons} lessons
+        </p>
+      )}
+      <h1 className="text-5xl font-bold tracking-tight sm:text-6xl lg:text-7xl">
         Learn to code,
         <br />
         <span className="text-muted-foreground">at your own pace</span>
@@ -79,7 +87,7 @@ function HeroCopy({
 
 function SpotlightCard({ course }: { course: LandingCourse }) {
   return (
-    <div className="relative mx-auto w-full max-w-md lg:mr-0">
+    <div className="relative w-full max-w-md lg:ml-auto">
       <div
         aria-hidden
         className="absolute inset-0 translate-x-3 translate-y-3 rotate-2 rounded-xl border border-border bg-muted"
@@ -89,7 +97,7 @@ function SpotlightCard({ course }: { course: LandingCourse }) {
         className="group relative block overflow-hidden rounded-xl border border-border bg-card shadow-lg transition-shadow hover:shadow-xl"
       >
         <span className="absolute top-3 left-3 z-10 rounded-full bg-background/90 px-2.5 py-1 text-xs font-semibold shadow-sm">
-          New · {course.categoryName}
+          Newest · {course.categoryName}
         </span>
         <CourseImage
           src={course.coverImageUrl}
