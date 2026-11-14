@@ -13,7 +13,7 @@ import {
 export type Db = BetterSQLite3Database<typeof schema>;
 
 /** How many courses the landing page shows below the spotlight. */
-export const FEATURED_COUNT = 3;
+const FEATURED_COUNT = 3;
 
 export type LandingCourse = {
   id: number;
@@ -69,25 +69,25 @@ function getLessonCounts(db: Db, courseIds: number[]) {
   return new Map(rows.map((row) => [row.courseId, row.lessonCount]));
 }
 
-function countRows(rows: { n: number }[]) {
-  const [{ n }] = rows;
-  return n;
+function singleCount(rows: { total: number }[]) {
+  const [{ total }] = rows;
+  return total;
 }
 
 function countPublishedCourses(db: Db) {
-  return countRows(
-    db.select({ n: count() }).from(courses).where(isPublished).all()
+  return singleCount(
+    db.select({ total: count() }).from(courses).where(isPublished).all()
   );
 }
 
 function countCategories(db: Db) {
-  return countRows(db.select({ n: count() }).from(categories).all());
+  return singleCount(db.select({ total: count() }).from(categories).all());
 }
 
 function countPublishedLessons(db: Db) {
-  return countRows(
+  return singleCount(
     db
-      .select({ n: count() })
+      .select({ total: count() })
       .from(lessons)
       .innerJoin(modules, eq(lessons.moduleId, modules.id))
       .innerJoin(courses, eq(modules.courseId, courses.id))
