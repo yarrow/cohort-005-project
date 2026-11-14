@@ -1,7 +1,8 @@
 import { Link } from "react-router";
-import { ArrowRight, BookOpen, Sparkles, User } from "lucide-react";
+import { ArrowRight, Sparkles } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { CourseImage } from "~/components/course-image";
+import { CourseByline } from "~/components/course-byline";
 import type { LandingCourse } from "~/modules/landing/index.server";
 
 export function LandingHero({
@@ -102,16 +103,11 @@ function SpotlightCard({ course }: { course: LandingCourse }) {
           <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
             {course.description}
           </p>
-          <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
-            <span className="flex items-center gap-1">
-              <User className="size-3" />
-              {course.instructorName}
-            </span>
-            <span className="flex items-center gap-1">
-              <BookOpen className="size-3" />
-              {course.lessonCount} lessons
-            </span>
-          </div>
+          <CourseByline
+            instructorName={course.instructorName}
+            lessonCount={course.lessonCount}
+            className="mt-4"
+          />
         </div>
       </Link>
     </div>
