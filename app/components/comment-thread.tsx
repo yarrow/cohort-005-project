@@ -5,6 +5,7 @@ import { MessageSquare, Pencil, Reply, Trash2 } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent } from "~/components/ui/card";
 import { Textarea } from "~/components/ui/textarea";
+import { SectionHeading } from "~/components/section-heading";
 import { UserAvatar } from "~/components/user-avatar";
 import { cn, formatRelativeTime } from "~/lib/utils";
 import { MAX_COMMENT_LENGTH } from "~/lib/comments";
@@ -365,12 +366,9 @@ export function CommentThread({
   instructorName: string;
 }) {
   return (
-    <Card className="mb-8">
+    <Card className="mb-8 py-0">
       <CardContent className="p-6">
-        <div className="mb-4 flex items-center gap-2">
-          <MessageSquare className="size-5 text-primary" />
-          <h2 className="text-xl font-semibold">Questions &amp; Discussion</h2>
-        </div>
+        <SectionHeading icon={MessageSquare} title="Questions & Discussion" />
 
         {comments.length === 0 ? (
           <div className="rounded-lg border border-dashed p-6 text-center">
