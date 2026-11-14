@@ -16,11 +16,14 @@ import {
 export function LessonNotes({ note }: { note: SavedNote | null }) {
   const fetcher = useFetcher<{ ok: boolean; error?: string }>();
   const [draft, setDraft] = useState(note?.body ?? "");
+  // The server's error is about the draft it was sent; once the Student
+  // edits, it no longer applies.
+  const [submittedDraft, setSubmittedDraft] = useState<string | null>(null);
   const { status, canSave } = describeNoteDraft({
     draft,
     saved: note,
     isSaving: fetcher.state !== "idle",
-    error: fetcher.data?.error,
+    error: draft === submittedDraft ? fetcher.data?.error : undefined,
     maxLength: MAX_NOTE_LENGTH,
   });
 
@@ -33,7 +36,11 @@ export function LessonNotes({ note }: { note: SavedNote | null }) {
           description="Jot things down while you watch. They stay with this lesson."
         />
 
-        <fetcher.Form method="post" className="space-y-2">
+        <fetcher.Form
+          method="post"
+          className="space-y-2"
+          onSubmit={() => setSubmittedDraft(draft)}
+        >
           <input type="hidden" name="intent" value="save-note" />
           <Textarea
             name="body"
